@@ -1,0 +1,19 @@
+{
+  "findings": [
+    {
+      "id": "1001",
+      "rule_name": "javascript.lang.security.audit.xss.react.dangerouslysetinnerhtml",
+      "severity": "HIGH",
+      "location": { "file_path": "src/components/Feed.jsx", "line": 42 },
+      "repository": { "name": "acme-frontend" }
+    },
+    {
+      "id": "1002",
+      "rule_name": "python.sqlalchemy.security.sqlalchemy-execute-raw-query",
+      "severity": "CRITICAL",
+      "location": { "file_path": "api/db.py", "line": 88 },
+      "repository": { "name": "acme-backend" }
+    }
+  ],
+  "total": 2
+}

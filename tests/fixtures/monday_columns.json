@@ -1,0 +1,18 @@
+{
+  "data": {
+    "boards": [
+      {
+        "columns": [
+          { "id": "name",     "title": "Name" },
+          { "id": "status0",  "title": "Severity" },
+          { "id": "text1",    "title": "Rule" },
+          { "id": "text2",    "title": "File" },
+          { "id": "text3",    "title": "Repo" },
+          { "id": "status4",  "title": "Type" },
+          { "id": "text5",    "title": "Finding ID" },
+          { "id": "link6",    "title": "Link" }
+        ]
+      }
+    ]
+  }
+}

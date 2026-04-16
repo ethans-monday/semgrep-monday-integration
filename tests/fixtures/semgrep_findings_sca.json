@@ -1,0 +1,12 @@
+{
+  "findings": [
+    {
+      "id": "3001",
+      "rule_name": "ssc-92d44a38-lodash-prototype-pollution",
+      "severity": "HIGH",
+      "location": { "file_path": "package-lock.json", "line": 120 },
+      "repository": { "name": "acme-frontend" }
+    }
+  ],
+  "total": 1
+}
