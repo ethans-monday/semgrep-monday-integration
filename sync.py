@@ -480,9 +480,9 @@ def run(state_path: Path = DEFAULT_STATE_FILE, limit: int | None = None) -> None
                 try:
                     body = body_formatter(finding)
                     board["client"].create_update(monday_id, body)
-                except MondayAPIError as exc:
+                except Exception as exc:
                     print(f"  [{board_type}] Warning: update post failed for {monday_id}: {exc}")
-            except MondayAPIError as exc:
+            except Exception as exc:
                 print(f"  [{board_type}] Failed for {finding.id}: {exc}")
 
     new_total = sum(len([f for f in fl if f.id not in already_synced]) for fl in findings_by_type.values())
