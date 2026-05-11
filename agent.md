@@ -70,9 +70,17 @@ To force a full re-sync, delete `state.json` before running.
 ## CLI flags
 
 ```
-python sync.py                # sync all findings
-python sync.py --limit 100    # cap at 100 findings per type
+python sync.py                        # sync all findings
+python sync.py --limit 100            # cap at 100 findings per type
+python sync.py --filters my.yaml      # use a specific filters file
+python sync.py --no-filters           # bypass filtering even if filters.yaml exists
 ```
+
+## Filtering
+
+Set `SEMGREP_FILTERS_FILE` to a YAML path, or use `--filters PATH`. If `filters.yaml` exists in the repo root it is applied automatically. `--no-filters` disables all filtering for that run.
+
+Filters are pushed to the Semgrep API as query params (server-side). Exception: `ai_verdict: [not_analyzed]` (and any list that includes it) is applied client-side after fetching, since the Semgrep API has no equivalent param for findings where the AI verdict field is absent. Filters gate new fetches only — `state.json` is never modified based on filter config.
 
 ## Lambda usage
 

@@ -103,13 +103,19 @@ class SemgrepClient:
     # Public API
     # ------------------------------------------------------------------
 
-    def fetch_findings(self, issue_type: str, max_findings: int = 10_000) -> list[Finding]:
+    def fetch_findings(
+        self,
+        issue_type: str,
+        max_findings: int = 10_000,
+        extra_params: dict | None = None,
+    ) -> list[Finding]:
         """Fetch SAST or SCA findings using offset pagination.
 
         Args:
             issue_type: ``"sast"`` or ``"sca"``
-            max_findings: Stop after collecting this many findings (default 100).
-                          Keeps each run within monday.com free-tier call budget.
+            max_findings: Stop after collecting this many findings.
+            extra_params: Additional query params (e.g. filter pushdowns). Pagination
+                          params ``page`` and ``page_size`` always take precedence.
         """
         url = f"{SEMGREP_BASE}/deployments/{self._slug}/findings"
         label = "SAST" if issue_type == "sast" else "SCA"
@@ -119,7 +125,14 @@ class SemgrepClient:
         while len(results) < max_findings:
             remaining = max_findings - len(results)
             page_size = min(100, remaining)
-            data = self._get(url, {"page": page, "page_size": page_size, "status": "open", "issue_type": issue_type})
+            params: dict = {"status": "open", "issue_type": issue_type}
+            if extra_params:
+                for k, v in extra_params.items():
+                    if k not in ("page", "page_size"):
+                        params[k] = v
+            params["page"] = page
+            params["page_size"] = page_size
+            data = self._get(url, params)
             batch = data.get("findings", [])
             if not batch:
                 break
@@ -128,12 +141,21 @@ class SemgrepClient:
 
         return results[:max_findings]
 
-    def fetch_secrets(self, max_findings: int = 10_000) -> list[Finding]:
+    def fetch_secrets(
+        self,
+        max_findings: int = 10_000,
+        extra_params: dict | None = None,
+    ) -> list[Finding]:
         """Fetch Secrets findings using cursor pagination.
 
         Uses the numeric deployment ID (not the slug), discovered automatically if not provided.
         The /secrets endpoint returns {"findings": [...], "cursor": "..."} — note the key
         is "findings", not "secrets", and each item uses a different schema from /findings.
+
+        Args:
+            max_findings: Stop after collecting this many findings.
+            extra_params: Additional query params (e.g. filter pushdowns). Pagination
+                          params ``limit`` and ``cursor`` always take precedence.
         """
         if not self._dep_id:
             self._dep_id = self._fetch_deployment_id()
@@ -144,7 +166,12 @@ class SemgrepClient:
         while len(results) < max_findings:
             remaining = max_findings - len(results)
             page_size = min(100, remaining)
-            params: dict = {"limit": page_size}
+            params: dict = {}
+            if extra_params:
+                for k, v in extra_params.items():
+                    if k not in ("limit", "cursor"):
+                        params[k] = v
+            params["limit"] = page_size
             if cursor:
                 params["cursor"] = cursor
 

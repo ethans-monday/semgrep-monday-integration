@@ -5,6 +5,8 @@ Usage:
     cp .env.example .env               # fill in credentials + board IDs
     python sync.py                     # sync all findings
     python sync.py --limit 50          # sync up to 50 per type
+    python sync.py --filters my.yaml   # apply custom filters file
+    python sync.py --no-filters        # skip filtering even if filters.yaml exists
 
 State is persisted in state.json. Re-running is safe — findings already synced
 are skipped (deduplication by Semgrep finding ID).
@@ -19,10 +21,12 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+from filters import filter_findings, load_filters, to_query_params
 from monday_client import MondayAPIError, MondayClient
 from semgrep_client import Finding, SemgrepAPIError, SemgrepClient
 
 DEFAULT_STATE_FILE = Path(__file__).parent / "state.json"
+DEFAULT_FILTERS_FILE = Path(__file__).parent / "filters.yaml"
 STATE_VERSION = 2
 
 
@@ -445,13 +449,31 @@ BOARD_CONFIG = {
 # Main
 # ---------------------------------------------------------------------------
 
-def run(state_path: Path = DEFAULT_STATE_FILE, limit: int | None = None) -> None:
+def _filter_log(board_type: str, fetched: int, kept: int, filters: dict) -> str:
+    block = filters.get(board_type, {})
+    if not block:
+        return f"{board_type.upper()}: {fetched} fetched (no filter)"
+    parts = ", ".join(f"{k}=[{','.join(v)}]" for k, v in block.items())
+    msg = f"{board_type.upper()}: {fetched} fetched (filters: {parts})"
+    if kept != fetched:
+        msg += f" → {kept} after client-side filter"
+    return msg
+
+
+def run(
+    state_path: Path = DEFAULT_STATE_FILE,
+    limit: int | None = None,
+    filters_path: Path | None = DEFAULT_FILTERS_FILE,
+) -> None:
     cfg = load_config()
     state = load_state(state_path)
 
     today = str(date.today())
     state.setdefault("daily", {})
     state["daily"].setdefault(today, 0)
+
+    # --- Load filters ---
+    filters = load_filters(filters_path)
 
     # --- Build clients ---
     slug = cfg["SEMGREP_DEPLOYMENT_SLUG"]
@@ -474,16 +496,23 @@ def run(state_path: Path = DEFAULT_STATE_FILE, limit: int | None = None) -> None
     print("Fetching Semgrep findings…")
     fetch_kwargs = {} if limit is None else {"max_findings": limit}
     try:
-        sast = semgrep.fetch_findings("sast", **fetch_kwargs)
-        sca = semgrep.fetch_findings("sca", **fetch_kwargs)
-        secrets = semgrep.fetch_secrets(**fetch_kwargs)
+        sast_raw = semgrep.fetch_findings("sast", extra_params=to_query_params("sast", filters), **fetch_kwargs)
+        sca_raw = semgrep.fetch_findings("sca", extra_params=to_query_params("sca", filters), **fetch_kwargs)
+        secrets_raw = semgrep.fetch_secrets(extra_params=to_query_params("secrets", filters), **fetch_kwargs)
     except SemgrepAPIError as exc:
         print(f"Semgrep API error: {exc}")
         sys.exit(1)
 
+    sast = filter_findings(sast_raw, "sast", filters)
+    sca = filter_findings(sca_raw, "sca", filters)
+    secrets = filter_findings(secrets_raw, "secrets", filters)
+
     findings_by_type = {"SAST": sast, "SCA": sca, "Secrets": secrets}
+    print(f"  {_filter_log('sast', len(sast_raw), len(sast), filters)}")
+    print(f"  {_filter_log('sca', len(sca_raw), len(sca), filters)}")
+    print(f"  {_filter_log('secrets', len(secrets_raw), len(secrets), filters)}")
     total = sum(len(v) for v in findings_by_type.values())
-    print(f"  SAST: {len(sast)}  SCA: {len(sca)}  Secrets: {len(secrets)}  Total: {total}")
+    print(f"  Total: {total}")
 
     # --- Deduplicate ---
     already_synced = set(state.get("synced", {}).keys())
@@ -534,5 +563,16 @@ def run(state_path: Path = DEFAULT_STATE_FILE, limit: int | None = None) -> None
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Sync Semgrep findings to monday.com")
     parser.add_argument("--limit", type=int, default=None, metavar="N", help="Max findings per type")
+    parser.add_argument("--filters", default=None, metavar="PATH", help="Path to filters YAML file")
+    parser.add_argument("--no-filters", action="store_true", help="Bypass filtering even if filters.yaml exists")
     args = parser.parse_args()
-    run(limit=args.limit)
+
+    if args.no_filters:
+        resolved_filters_path = None
+    elif args.filters:
+        resolved_filters_path = Path(args.filters)
+    else:
+        env_path = os.getenv("SEMGREP_FILTERS_FILE")
+        resolved_filters_path = Path(env_path) if env_path else DEFAULT_FILTERS_FILE
+
+    run(limit=args.limit, filters_path=resolved_filters_path)

@@ -100,6 +100,60 @@ The script tracks synced findings in `state.json`. Running it multiple times is 
 
 Use `--limit N` to cap the number of findings fetched per type. Useful for initial testing or when you want to gradually populate boards.
 
+### Filtering
+
+The sync supports a YAML config file that gates which findings are fetched from Semgrep. Filters are pushed to the Semgrep API as query params (server-side) — only matching findings are downloaded, saving API budget and bandwidth.
+
+**File location and precedence:**
+1. `--filters PATH` CLI flag
+2. `SEMGREP_FILTERS_FILE` env var
+3. `filters.yaml` at the repo root (default)
+4. `--no-filters` flag bypasses filtering entirely even if a file exists
+
+**No file = no filtering** (current behavior is preserved).
+
+Copy the example file to get started:
+
+```bash
+cp filters.example.yaml filters.yaml
+# then edit filters.yaml to match your needs
+```
+
+Example `filters.yaml`:
+
+```yaml
+sast:
+  severity: [CRITICAL, HIGH]
+  confidence: [HIGH]
+  ai_verdict: [true_positive]
+
+sca:
+  severity: [CRITICAL, HIGH]
+  reachability: [reachable]
+
+secrets:
+  validation_state: [VALIDATION_STATE_CONFIRMED_VALID]
+```
+
+**Semantics:** all keys within a block must match (AND); all values within a list match as OR. Unknown keys and unknown board types cause a hard failure at load time — typos are caught immediately. Non-list values (e.g. `severity: HIGH` instead of `severity: [HIGH]`) also fail with a clear error.
+
+**Supported filter keys per board type:**
+
+| Key | SAST | SCA | Secrets |
+|---|---|---|---|
+| `severity` | ✓ (low/medium/high/critical) | ✓ | ✓ (SEVERITY_HIGH etc.) |
+| `confidence` | ✓ scalar | ✓ scalar | |
+| `repo` | ✓ | ✓ | ✓ |
+| `rule` | ✓ | | |
+| `ai_verdict` | ✓ (true_positive, false_positive, not_analyzed¹) | | |
+| `reachability` | | ✓ | |
+| `transitivity` | | ✓ | |
+| `validation_state` | | | ✓ |
+
+¹ `not_analyzed` (and any list that includes it) is applied client-side after fetching — the Semgrep API has no equivalent param for findings where the AI verdict field is absent.
+
+Filters gate new fetches only — existing items in `state.json` are never modified or removed.
+
 ### State file
 
 `state.json` stores:

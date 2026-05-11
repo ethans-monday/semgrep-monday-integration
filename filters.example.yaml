@@ -1,0 +1,71 @@
+# filters.example.yaml — gates which Semgrep findings are synced to monday.com.
+#
+# Copy this file to filters.yaml (gitignored) and edit to your needs.
+#
+# Semantics:
+#   - Per-board-type blocks (sast / sca / secrets). Omit a block to sync everything for that type.
+#   - Within a block: ALL keys must match (AND).
+#   - Within a list: ANY value matches (OR).
+#   - All filters are pushed to the Semgrep API as query params (server-side).
+#     No extra findings are downloaded — this saves API budget and bandwidth.
+#   - No file = sync everything.
+#   - Filters gate new fetches only. Findings already in state.json are never deleted.
+#
+# Supported keys per board type:
+#
+#   sast:
+#     severity        — [low, medium, high, critical]  (repeatable — any match)
+#     confidence      — [low | medium | high]           (single value only — scalar param)
+#     repo            — [org/repo1, org/repo2]          (repeatable — any match)
+#     rule            — [rule.id.one, rule.id.two]      (repeatable — any match)
+#     ai_verdict      — [true_positive | false_positive] (single value only — scalar param)
+#
+#   sca:
+#     severity        — [low, medium, high, critical]  (repeatable — any match)
+#     confidence      — [low | medium | high]           (single value only — scalar param)
+#     repo            — [org/repo1, org/repo2]          (repeatable — any match)
+#     reachability    — [reachable, always_reachable, conditionally_reachable, unreachable, unknown]
+#     transitivity    — [direct, transitive, unknown]
+#
+#   secrets:
+#     severity         — [SEVERITY_HIGH, SEVERITY_CRITICAL, SEVERITY_MEDIUM, SEVERITY_LOW]
+#                        Note: secrets API uses SEVERITY_ prefix, unlike SAST/SCA.
+#     repo             — [org/repo1, org/repo2]
+#     validation_state — [VALIDATION_STATE_CONFIRMED_VALID, VALIDATION_STATE_CONFIRMED_INVALID,
+#                         VALIDATION_STATE_NO_VALIDATOR, VALIDATION_STATE_VALIDATION_ERROR]
+
+# --- Worked example 1: high+critical SAST that AI flagged as true positive ---
+# sast:
+#   severity: [high, critical]
+#   ai_verdict: [true_positive]
+
+# --- Worked example 2: reachable direct SCA only ---
+# sca:
+#   severity: [high, critical]
+#   reachability: [reachable, always_reachable]
+#   transitivity: [direct]
+
+# --- Worked example 3: only confirmed-valid secrets ---
+# secrets:
+#   validation_state: [VALIDATION_STATE_CONFIRMED_VALID]
+
+# Full example (uncomment and edit):
+# sast:
+#   severity: [high, critical]
+#   confidence: [high]
+#   ai_verdict: [true_positive, not_analyzed]
+
+# sca:
+#   severity: [high, critical]
+#   reachability: [reachable, always_reachable, conditionally_reachable, unknown]
+#   transitivity: [direct]
+
+# secrets:
+#   severity: [SEVERITY_HIGH, SEVERITY_CRITICAL]
+#   validation_state: [VALIDATION_STATE_CONFIRMED_VALID, VALIDATION_STATE_NO_VALIDATOR, VALIDATION_STATE_VALIDATION_ERROR]
+
+# Future / not yet supported — will be added in a later iteration:
+#   - negation:   !severity: [low]
+#   - numeric:    epss_score_min: 0.5
+#   - substring:  rule_name_contains: [sql, xss]
+#   - boolean:    is_malicious: true, has_fix: true
