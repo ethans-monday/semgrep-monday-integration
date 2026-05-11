@@ -16,6 +16,7 @@ import argparse
 import json
 import os
 import sys
+from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
@@ -92,6 +93,88 @@ def _set_dropdown_col(col_vals: dict, col_map: dict[str, str], title: str, items
 def _fmt_field(label: str, value: str) -> str | None:
     """Return an HTML-formatted '<b>Label:</b> value' line, or None if value is empty."""
     return f"<b>{label}:</b> {value}" if value else None
+
+
+@dataclass
+class FindingGroup:
+    representative: Finding
+    members: list[Finding]
+
+
+_SEVERITY_RANK = {"CRITICAL": 4, "HIGH": 3, "MEDIUM": 2, "LOW": 1}
+_CONFIDENCE_RANK = {"HIGH": 3, "MEDIUM": 2, "LOW": 1}
+
+
+def _finding_score(finding: Finding, board_type: str) -> tuple:
+    sev = _SEVERITY_RANK.get(finding.severity.upper(), 0)
+    raw = finding.raw
+    conf_str = _safe_get(raw, "confidence").upper()
+    if conf_str.startswith("CONFIDENCE_"):
+        conf_str = conf_str[len("CONFIDENCE_"):]
+    conf = _CONFIDENCE_RANK.get(conf_str, 0)
+    if board_type == "SCA":
+        reach = _safe_get(raw, "reachability").lower()
+        reach_score = 2 if reach in ("reachable", "always_reachable", "conditionally_reachable") else (1 if reach == "unknown" else 0)
+        return (sev, reach_score, conf)
+    verdict = _safe_get(raw, "assistant", "autotriage", "verdict")
+    verdict_score = 2 if verdict == "true_positive" else (0 if verdict == "false_positive" else 1)
+    return (sev, verdict_score, conf)
+
+
+def _sca_group_key(finding: Finding) -> tuple:
+    dep = finding.raw.get("found_dependency") or {}
+    return (finding.repo, dep.get("package", ""), dep.get("version", ""))
+
+
+def _sast_group_key(finding: Finding) -> tuple:
+    loc = finding.raw.get("location") or {}
+    end_loc = f"{loc.get('end_line', '')}:{loc.get('end_column', '')}"
+    return (finding.repo, finding.file_path, end_loc)
+
+
+def group_findings(findings: list[Finding], board_type: str) -> list[FindingGroup]:
+    key_fn = _sca_group_key if board_type == "SCA" else _sast_group_key
+    groups: dict[tuple, list[Finding]] = {}
+    for f in findings:
+        groups.setdefault(key_fn(f), []).append(f)
+    result = []
+    for members in groups.values():
+        members.sort(key=lambda f: _finding_score(f, board_type), reverse=True)
+        result.append(FindingGroup(representative=members[0], members=members))
+    return result
+
+
+def _apply_sca_merged_fields(cv: dict, col_map: dict[str, str], group: FindingGroup) -> None:
+    if len(group.members) <= 1:
+        return
+    _set_col(cv, col_map, "Finding ID", ", ".join(f.id for f in group.members))
+    cves = [_safe_get(f.raw, "vulnerability_identifier") for f in group.members]
+    _set_col(cv, col_map, "CVE", ", ".join(c for c in cves if c))
+
+
+def _apply_sast_merged_fields(cv: dict, col_map: dict[str, str], group: FindingGroup) -> None:
+    if len(group.members) <= 1:
+        return
+    _set_col(cv, col_map, "Finding ID", ", ".join(f.id for f in group.members))
+    rules = list(dict.fromkeys(f.rule_name for f in group.members))
+    _set_col(cv, col_map, "Rule", ", ".join(rules))
+    all_cwes = []
+    all_owasp = []
+    all_vuln_classes = []
+    for f in group.members:
+        rule = f.raw.get("rule") or {}
+        for c in (rule.get("cwe_names") or []):
+            if c not in all_cwes:
+                all_cwes.append(c)
+        for o in (rule.get("owasp_names") or []):
+            if o not in all_owasp:
+                all_owasp.append(o)
+        for v in (rule.get("vulnerability_classes") or []):
+            if v not in all_vuln_classes:
+                all_vuln_classes.append(v)
+    _set_col(cv, col_map, "CWE", _join_list(all_cwes))
+    _set_dropdown_col(cv, col_map, "OWASP", all_owasp)
+    _set_dropdown_col(cv, col_map, "Vuln Classes", all_vuln_classes)
 
 
 def _semgrep_finding_url(slug: str, finding: Finding) -> str:
@@ -423,6 +506,107 @@ def format_update_body_secrets(finding: Finding) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Group-aware update body formatters
+# ---------------------------------------------------------------------------
+
+def format_update_body_sca_group(group: FindingGroup, slug: str) -> str:
+    rep = group.representative
+    dep = rep.raw.get("found_dependency") or {}
+    pkg = _safe_get(dep, "package")
+    ver = _safe_get(dep, "version")
+    eco = _safe_get(dep, "ecosystem")
+    pkg_str = f"{pkg}@{ver} ({eco})" if pkg else ""
+    n = len(group.members)
+    header = f"<b>[{rep.severity}]</b> {pkg_str} — {rep.repo} — {n} CVE{'s' if n > 1 else ''}"
+    sections = [header]
+
+    for f in group.members:
+        raw = f.raw
+        fdep = raw.get("found_dependency") or {}
+        epss = raw.get("epss_score") or {}
+        cve = _safe_get(raw, "vulnerability_identifier")
+        sev_label = _SEVERITY_LABELS.get(f.severity, f.severity.capitalize())
+        entry_header = f"<b>{cve}</b> ({sev_label})" if cve else f"<b>{f.rule_name}</b> ({sev_label})"
+        fields = [
+            entry_header,
+            _fmt_field("Reachability", _safe_get(raw, "reachability").capitalize()),
+            _fmt_field("Reachable Condition", _safe_get(raw, "reachable_condition")),
+        ]
+        epss_score = epss.get("score")
+        epss_pct = epss.get("percentile")
+        if epss_score is not None:
+            epss_str = f"{epss_score} (percentile: {epss_pct})" if epss_pct is not None else str(epss_score)
+            fields.append(_fmt_field("EPSS", epss_str))
+        fix_recs = raw.get("fix_recommendations") or []
+        fix_str = ", ".join(f"{r['package']}@{r['version']}" for r in fix_recs if isinstance(r, dict))
+        fields.append(_fmt_field("Fix", fix_str))
+        fields.append(_fmt_field("Semgrep URL", _semgrep_finding_url(slug, f)))
+        sections.append("<br>".join(x for x in fields if x))
+
+    common = [
+        _fmt_field("Package", f"{pkg}@{ver}" if pkg else ""),
+        _fmt_field("Ecosystem", eco),
+        _fmt_field("Transitivity", _safe_get(dep, "transitivity").capitalize()),
+        _fmt_field("Is Malicious", "Yes" if rep.raw.get("is_malicious") else "No"),
+        _fmt_field("Lockfile URL", _safe_get(dep, "lockfile_line_url")),
+        _fmt_field("Triage State", _snake_to_title(_safe_get(rep.raw, "triage_state"))),
+    ]
+    common_block = "<br>".join(x for x in common if x)
+    if common_block:
+        sections.append(common_block)
+
+    return "<br><br>".join(sections)
+
+
+def format_update_body_sast_group(group: FindingGroup, slug: str) -> str:
+    rep = group.representative
+    n = len(group.members)
+    header = (
+        f"<b>[{rep.severity}]</b> {rep.repo} — "
+        f"{rep.file_path}:{rep.line} — {n} finding{'s' if n > 1 else ''}"
+    )
+    sections = [header]
+
+    for f in group.members:
+        raw = f.raw
+        rule = raw.get("rule") or {}
+        assistant = raw.get("assistant") or {}
+        sev_label = _SEVERITY_LABELS.get(f.severity, f.severity.capitalize())
+        entry_header = f"<b>{f.rule_name}</b> ({sev_label})"
+        fields = [
+            entry_header,
+            _fmt_field("AI Verdict", _snake_to_title(_safe_get(assistant, "autotriage", "verdict")) or "Not analyzed"),
+            _fmt_field("AI Reason", _safe_get(assistant, "autotriage", "reason")),
+            _fmt_field("CWE", _join_list(rule.get("cwe_names"))),
+            _fmt_field("OWASP", _join_list(rule.get("owasp_names"))),
+            _fmt_field("Vuln Classes", _join_list(rule.get("vulnerability_classes"))),
+        ]
+        explanation = _safe_get(assistant, "rule_explanation", "explanation")
+        if explanation:
+            fields.append(f"<b>Description:</b> {_truncate(explanation, 300)}")
+        guidance = _safe_get(assistant, "guidance", "summary")
+        if guidance:
+            fields.append(_fmt_field("Remediation", guidance))
+        fix_code = _safe_get(assistant, "autofix", "fix_code")
+        if fix_code:
+            fields.append(f"<b>Fix:</b><br><pre>{fix_code}</pre>")
+        fields.append(_fmt_field("Semgrep URL", _semgrep_finding_url(slug, f)))
+        sections.append("<br>".join(x for x in fields if x))
+
+    common = [
+        _fmt_field("File", f"{rep.file_path}:{rep.line}"),
+        _fmt_field("Repo", rep.repo),
+        _fmt_field("Triage State", _snake_to_title(_safe_get(rep.raw, "triage_state"))),
+        _fmt_field("Confidence", _safe_get(rep.raw, "confidence")),
+    ]
+    common_block = "<br>".join(x for x in common if x)
+    if common_block:
+        sections.append(common_block)
+
+    return "<br><br>".join(sections)
+
+
+# ---------------------------------------------------------------------------
 # Board routing config
 # ---------------------------------------------------------------------------
 
@@ -522,7 +706,7 @@ def run(
     total = sum(len(v) for v in findings_by_type.values())
     print(f"  Total: {total}")
 
-    # --- Deduplicate ---
+    # --- Deduplicate against previously synced ---
     already_synced = set(state.get("synced", {}).keys())
 
     # --- Fetch column maps (one per board, only if that board has new findings) ---
@@ -530,42 +714,96 @@ def run(
 
     # --- Route and create ---
     created = 0
-    for board_type, type_findings in findings_by_type.items():
+    total_new_findings = 0
+
+    # --- SAST and SCA: group findings, create one item per group ---
+    for board_type in ("SAST", "SCA"):
+        type_findings = findings_by_type.get(board_type, [])
         new = [f for f in type_findings if f.id not in already_synced]
+        total_new_findings += len(new)
         if not new:
             continue
 
         board = boards[board_type]
         if board_type not in col_maps:
             col_maps[board_type] = board["client"].get_column_map()
-
         col_map = col_maps[board_type]
+        mapper = board["mapper"]
+
+        groups = group_findings(new, board_type)
+        grouped_count = len(new) - len(groups)
+        if grouped_count > 0:
+            print(f"  [{board_type}] {len(new)} findings → {len(groups)} items ({grouped_count} grouped)")
+
+        for group in groups:
+            finding = group.representative
+            item_name, col_vals = mapper(finding, col_map)
+            if board_type == "SCA":
+                _apply_sca_merged_fields(col_vals, col_map, group)
+            else:
+                _apply_sast_merged_fields(col_vals, col_map, group)
+            _set_link_col(col_vals, col_map, "Semgrep URL", _semgrep_finding_url(slug, finding))
+            try:
+                monday_id, _ = board["client"].create_item(item_name, col_vals)
+                for f in group.members:
+                    state["synced"][f.id] = {
+                        "monday_item_id": monday_id,
+                        "board": board_type,
+                    }
+                state["daily"][today] += 1
+                created += 1
+                member_ids = ", ".join(f.id for f in group.members)
+                print(f"  [{board_type}] {member_ids} → monday item {monday_id}")
+                try:
+                    if len(group.members) > 1:
+                        if board_type == "SCA":
+                            body = format_update_body_sca_group(group, slug)
+                        else:
+                            body = format_update_body_sast_group(group, slug)
+                    else:
+                        body = board["body_formatter"](finding)
+                    board["client"].create_update(monday_id, body)
+                except Exception as exc:
+                    print(f"  [{board_type}] Warning: update post failed for {monday_id}: {exc}")
+            except Exception as exc:
+                member_ids = ", ".join(f.id for f in group.members)
+                print(f"  [{board_type}] Failed for {member_ids}: {exc}")
+
+    # --- Secrets: no grouping, one item per finding ---
+    secrets_findings = findings_by_type.get("Secrets", [])
+    new_secrets = [f for f in secrets_findings if f.id not in already_synced]
+    total_new_findings += len(new_secrets)
+    if new_secrets:
+        board = boards["Secrets"]
+        if "Secrets" not in col_maps:
+            col_maps["Secrets"] = board["client"].get_column_map()
+        col_map = col_maps["Secrets"]
         mapper = board["mapper"]
         body_formatter = board["body_formatter"]
 
-        for finding in new:
+        for finding in new_secrets:
             item_name, col_vals = mapper(finding, col_map)
             _set_link_col(col_vals, col_map, "Semgrep URL", _semgrep_finding_url(slug, finding))
             try:
                 monday_id, _ = board["client"].create_item(item_name, col_vals)
                 state["synced"][finding.id] = {
                     "monday_item_id": monday_id,
-                    "board": board_type,
+                    "board": "Secrets",
                 }
                 state["daily"][today] += 1
                 created += 1
-                print(f"  [{board_type}] {finding.id} → monday item {monday_id}")
+                print(f"  [Secrets] {finding.id} → monday item {monday_id}")
                 try:
                     body = body_formatter(finding)
                     board["client"].create_update(monday_id, body)
                 except Exception as exc:
-                    print(f"  [{board_type}] Warning: update post failed for {monday_id}: {exc}")
+                    print(f"  [Secrets] Warning: update post failed for {monday_id}: {exc}")
             except Exception as exc:
-                print(f"  [{board_type}] Failed for {finding.id}: {exc}")
+                print(f"  [Secrets] Failed for {finding.id}: {exc}")
 
-    new_total = sum(len([f for f in fl if f.id not in already_synced]) for fl in findings_by_type.values())
     save_state(state, state_path)
-    print(f"\nDone: {created} created, {new_total - created} failed.")
+    failed = total_new_findings - sum(1 for f_list in findings_by_type.values() for f in f_list if f.id in state.get("synced", {})) + len(already_synced)
+    print(f"\nDone: {created} items created, {total_new_findings} new findings processed.")
 
 
 if __name__ == "__main__":

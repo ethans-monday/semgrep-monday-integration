@@ -19,11 +19,12 @@ The numeric deployment ID (required for the `/secrets` endpoint) is auto-discove
 
 ## Behavior
 
-1. Fetches all open findings from Semgrep (SAST, SCA, Secrets).
+1. Fetches all open findings from Semgrep (SAST, SCA, Secrets). SAST and SCA use `dedup=true` to deduplicate across branches.
 2. Loads `state.json` for deduplication. Findings already synced are skipped.
-3. For each new finding, creates a monday.com item on the appropriate board with all available metadata and a deep-link to the finding in the Semgrep Cloud UI.
-4. Immediately after each successful item creation, posts a rich HTML update (finding description, AI remediation guidance, suggested fix code) to the item's Updates feed.
-5. Saves updated state after processing each type.
+3. Groups new SAST and SCA findings to reduce board noise (see **Finding grouping** below). Secrets are not grouped.
+4. For each group (or individual Secrets finding), creates a monday.com item on the appropriate board with all available metadata and a deep-link to the finding in the Semgrep Cloud UI.
+5. Immediately after each successful item creation, posts a rich HTML update to the item's Updates feed. Grouped items list each member finding's details and Semgrep URL.
+6. Saves updated state. All member finding IDs in a group are recorded, pointing to the same monday.com item ID.
 
 ## Error handling
 
@@ -33,11 +34,21 @@ The numeric deployment ID (required for the `/secrets` endpoint) is auto-discove
 - **monday.com rate limiting (429)** -- automatically retries up to 3 times, respecting the `Retry-After` header.
 - **Transient transport errors** (`httpx.ReadError`, `ConnectError`, timeouts) -- caught at both call sites so a single blip does not crash a full sync.
 
-## API budget per new finding
+## Finding grouping
 
-Each new finding consumes **2** monday.com API calls: one `create_item` plus one `create_update`. Plus one `get_column_map` query per board per run (cached after first use).
+SAST and SCA findings are grouped before item creation to reduce board noise:
 
-A full sync of 1,000 new findings costs roughly 2,003 calls. Idempotent re-runs only spend calls on findings that haven't been synced before.
+- **SCA:** Grouped by `{repo, package, version}`. CVE column contains all CVEs (comma-separated). Representative (used for item name, severity, links) is chosen by highest severity → reachable → highest confidence.
+- **SAST:** Grouped by `{repo, file, end location}`. Rule names, CWEs, OWASP, and vulnerability classes are merged across members. Representative chosen by highest severity → AI true positive → highest confidence.
+- **Secrets:** Not grouped.
+
+All member finding IDs are tracked in `state.json` — re-runs skip the entire group. Grouping only applies to new (not-yet-synced) findings; it does not compare against previously synced items.
+
+## API budget
+
+Each group (or individual Secrets finding) consumes **2** monday.com API calls: one `create_item` plus one `create_update`. Plus one `get_column_map` query per board per run (cached after first use).
+
+Grouping reduces API spend — e.g. 10 SCA findings across 3 packages becomes 3 items (6 calls) instead of 10 items (20 calls). Idempotent re-runs only spend calls on findings that haven't been synced before.
 
 ## State file format (v2)
 

@@ -92,6 +92,17 @@ python sync.py --limit 50   # sync up to 50 per type (for testing)
 
 ## Usage
 
+### Finding grouping
+
+SAST and SCA findings are automatically grouped to reduce board noise:
+
+- **SCA:** Findings with the same `{repo, package, version}` become a single board item. The CVE column contains all CVEs (comma-separated). The item's representative (used for severity, file, links) is chosen by highest severity → reachable → highest confidence.
+- **SAST:** Findings with the same `{repo, file, end location}` become a single board item. Rule names, CWEs, OWASP, and vulnerability classes are merged. Representative chosen by highest severity → AI true positive → highest confidence.
+
+Grouped items get a richer Updates-feed post listing each member finding's details and Semgrep URL. All member finding IDs are tracked in `state.json`, so re-runs won't re-sync any of them.
+
+Secrets findings are not grouped.
+
 ### Idempotent syncs
 
 The script tracks synced findings in `state.json`. Running it multiple times is safe -- findings already synced are skipped. This makes it suitable for cron jobs or scheduled runs.

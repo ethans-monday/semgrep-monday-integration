@@ -4,6 +4,7 @@ Both Semgrep and monday.com HTTP calls are intercepted by pytest-httpx.
 """
 
 import json
+import re
 from datetime import date
 from pathlib import Path
 
@@ -101,15 +102,10 @@ def state_file(tmp_path) -> Path:
 
 
 def _add_semgrep_pages(httpx_mock, issue_type, findings):
-    httpx_mock.add_response(
-        url=f"{SEMGREP_FINDINGS_URL}?page=0&page_size=100&status=open&issue_type={issue_type}",
-        json={"findings": findings},
-    )
+    url_re = re.compile(rf"^{re.escape(SEMGREP_FINDINGS_URL)}\?.*issue_type={issue_type}")
+    httpx_mock.add_response(url=url_re, json={"findings": findings})
     if findings:
-        httpx_mock.add_response(
-            url=f"{SEMGREP_FINDINGS_URL}?page=1&page_size=100&status=open&issue_type={issue_type}",
-            json={"findings": []},
-        )
+        httpx_mock.add_response(url=url_re, json={"findings": []})
 
 
 def _add_secrets(httpx_mock, secrets):
@@ -160,7 +156,7 @@ def test_full_sync_run(httpx_mock, env_vars, state_file):
     _add_secrets(httpx_mock, [_secret_finding("s1")])
     _add_monday_responses(httpx_mock, n_sast=2, n_sca=1, n_secrets=1)
 
-    sync.run(state_path=state_file)
+    sync.run(state_path=state_file, filters_path=None)
 
     state = json.loads(state_file.read_text())
     assert len(state["synced"]) == 4
@@ -176,13 +172,13 @@ def test_idempotent_second_run(httpx_mock, env_vars, state_file):
     _add_semgrep_pages(httpx_mock, "sca", [])
     _add_secrets(httpx_mock, [])
     _add_monday_responses(httpx_mock, n_sast=1)
-    sync.run(state_path=state_file)
+    sync.run(state_path=state_file, filters_path=None)
 
     # Second run — same finding, should be skipped
     _add_semgrep_pages(httpx_mock, "sast", [_sast_finding("f1")])
     _add_semgrep_pages(httpx_mock, "sca", [])
     _add_secrets(httpx_mock, [])
-    sync.run(state_path=state_file)
+    sync.run(state_path=state_file, filters_path=None)
 
     state = json.loads(state_file.read_text())
     assert len(state["synced"]) == 1
@@ -207,7 +203,7 @@ def test_partial_failure_recovery(httpx_mock, env_vars, state_file):
 
     board_map = {1001: monday, 1002: MagicMock(), 1003: MagicMock()}
     with patch("sync.MondayClient", side_effect=lambda token, board_id: board_map[board_id]):
-        sync.run(state_path=state_file)
+        sync.run(state_path=state_file, filters_path=None)
 
     state = json.loads(state_file.read_text())
     assert "1" in state["synced"]
@@ -232,8 +228,30 @@ def test_secrets_cursor_exhausted(httpx_mock, env_vars, state_file):
 
     _add_monday_responses(httpx_mock, n_secrets=2)
 
-    sync.run(state_path=state_file)
+    sync.run(state_path=state_file, filters_path=None)
 
     state = json.loads(state_file.read_text())
     assert set(state["synced"].keys()) == {"s1", "s2"}
     assert all(s["board"] == "Secrets" for s in state["synced"].values())
+
+
+def test_sca_grouping_creates_single_item(httpx_mock, env_vars, state_file):
+    """Two SCA findings with same {repo, package, version} produce one monday item."""
+    sca1 = _sca_finding("f1", severity="CRITICAL")
+    sca1["vulnerability_identifier"] = "CVE-2024-001"
+    sca2 = _sca_finding("f2", severity="HIGH")
+    sca2["vulnerability_identifier"] = "CVE-2024-002"
+
+    _add_semgrep_pages(httpx_mock, "sast", [])
+    _add_semgrep_pages(httpx_mock, "sca", [sca1, sca2])
+    _add_secrets(httpx_mock, [])
+    # Only 1 SCA item should be created (grouped)
+    _add_monday_responses(httpx_mock, n_sca=1)
+
+    sync.run(state_path=state_file, filters_path=None)
+
+    state = json.loads(state_file.read_text())
+    assert len(state["synced"]) == 2
+    assert state["synced"]["f1"]["board"] == "SCA"
+    assert state["synced"]["f2"]["board"] == "SCA"
+    assert state["synced"]["f1"]["monday_item_id"] == state["synced"]["f2"]["monday_item_id"]
