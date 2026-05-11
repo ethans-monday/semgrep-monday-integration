@@ -464,7 +464,10 @@ def run(
     state_path: Path = DEFAULT_STATE_FILE,
     limit: int | None = None,
     filters_path: Path | None = DEFAULT_FILTERS_FILE,
+    types: set[str] | None = None,
 ) -> None:
+    # types=None means all; validate against known board keys
+    active_types = types if types is not None else set(BOARD_CONFIG)
     cfg = load_config()
     state = load_state(state_path)
 
@@ -484,6 +487,8 @@ def run(
 
     boards: dict[str, dict] = {}
     for board_type, bc in BOARD_CONFIG.items():
+        if board_type not in active_types:
+            continue
         board_id = int(cfg[bc["env_var"]])
         client = MondayClient(token=cfg["MONDAY_API_TOKEN"], board_id=board_id)
         boards[board_type] = {
@@ -496,9 +501,9 @@ def run(
     print("Fetching Semgrep findings…")
     fetch_kwargs = {} if limit is None else {"max_findings": limit}
     try:
-        sast_raw = semgrep.fetch_findings("sast", extra_params=to_query_params("sast", filters), **fetch_kwargs)
-        sca_raw = semgrep.fetch_findings("sca", extra_params=to_query_params("sca", filters), **fetch_kwargs)
-        secrets_raw = semgrep.fetch_secrets(extra_params=to_query_params("secrets", filters), **fetch_kwargs)
+        sast_raw = semgrep.fetch_findings("sast", extra_params=to_query_params("sast", filters), **fetch_kwargs) if "SAST" in active_types else []
+        sca_raw = semgrep.fetch_findings("sca", extra_params=to_query_params("sca", filters), **fetch_kwargs) if "SCA" in active_types else []
+        secrets_raw = semgrep.fetch_secrets(extra_params=to_query_params("secrets", filters), **fetch_kwargs) if "Secrets" in active_types else []
     except SemgrepAPIError as exc:
         print(f"Semgrep API error: {exc}")
         sys.exit(1)
@@ -508,9 +513,12 @@ def run(
     secrets = filter_findings(secrets_raw, "secrets", filters)
 
     findings_by_type = {"SAST": sast, "SCA": sca, "Secrets": secrets}
-    print(f"  {_filter_log('sast', len(sast_raw), len(sast), filters)}")
-    print(f"  {_filter_log('sca', len(sca_raw), len(sca), filters)}")
-    print(f"  {_filter_log('secrets', len(secrets_raw), len(secrets), filters)}")
+    if "SAST" in active_types:
+        print(f"  {_filter_log('sast', len(sast_raw), len(sast), filters)}")
+    if "SCA" in active_types:
+        print(f"  {_filter_log('sca', len(sca_raw), len(sca), filters)}")
+    if "Secrets" in active_types:
+        print(f"  {_filter_log('secrets', len(secrets_raw), len(secrets), filters)}")
     total = sum(len(v) for v in findings_by_type.values())
     print(f"  Total: {total}")
 
@@ -562,10 +570,22 @@ def run(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Sync Semgrep findings to monday.com")
+    _VALID_TYPES = {"sast": "SAST", "sca": "SCA", "secrets": "Secrets"}
     parser.add_argument("--limit", type=int, default=None, metavar="N", help="Max findings per type")
     parser.add_argument("--filters", default=None, metavar="PATH", help="Path to filters YAML file")
     parser.add_argument("--no-filters", action="store_true", help="Bypass filtering even if filters.yaml exists")
+    parser.add_argument("--type", default=None, metavar="TYPES",
+                        help="Comma-separated list of types to sync: sast,sca,secrets (default: all)")
     args = parser.parse_args()
+
+    if args.type:
+        raw_types = [t.strip().lower() for t in args.type.split(",")]
+        unknown = [t for t in raw_types if t not in _VALID_TYPES]
+        if unknown:
+            parser.error(f"Unknown type(s): {', '.join(unknown)}. Valid: sast, sca, secrets")
+        resolved_types = {_VALID_TYPES[t] for t in raw_types}
+    else:
+        resolved_types = None
 
     if args.no_filters:
         resolved_filters_path = None
@@ -575,4 +595,4 @@ if __name__ == "__main__":
         env_path = os.getenv("SEMGREP_FILTERS_FILE")
         resolved_filters_path = Path(env_path) if env_path else DEFAULT_FILTERS_FILE
 
-    run(limit=args.limit, filters_path=resolved_filters_path)
+    run(limit=args.limit, filters_path=resolved_filters_path, types=resolved_types)
