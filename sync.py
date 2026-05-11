@@ -1,4 +1,4 @@
-"""Semgrep → Monday.com sync script (three-board architecture).
+"""Semgrep → monday.com sync script (three-board architecture).
 
 Usage:
     python setup_boards.py             # one-time: create boards + columns
@@ -54,10 +54,35 @@ def _join_list(items) -> str:
     return ""
 
 
+def _snake_to_title(s: str) -> str:
+    return " ".join(w.capitalize() for w in s.split("_")) if s else ""
+
+
 def _set_col(col_vals: dict, col_map: dict[str, str], title: str, value: str) -> None:
-    """Set a column value only if that column exists on the board."""
+    """Set a text column value."""
     if title in col_map and value:
         col_vals[col_map[title]] = value
+
+
+def _set_status_col(col_vals: dict, col_map: dict[str, str], title: str, value: str) -> None:
+    """Set a status column value using monday.com's {"label": "..."} format."""
+    if title in col_map and value:
+        col_vals[col_map[title]] = {"label": value}
+
+
+def _set_link_col(col_vals: dict, col_map: dict[str, str], title: str, url: str) -> None:
+    """Set a link column value using monday.com's {"url": "...", "text": "..."} format."""
+    if title in col_map and url:
+        col_vals[col_map[title]] = {"url": url, "text": "Open"}
+
+
+def _set_dropdown_col(col_vals: dict, col_map: dict[str, str], title: str, items: list | None) -> None:
+    """Set a dropdown column value using monday.com's {"labels": [...]} format."""
+    if title not in col_map or not items:
+        return
+    labels = [str(i) for i in items if i]
+    if labels:
+        col_vals[col_map[title]] = {"labels": labels}
 
 
 def _fmt_field(label: str, value: str) -> str | None:
@@ -105,7 +130,6 @@ def save_state(state: dict, path: Path) -> None:
 REQUIRED_ENV_VARS = [
     "SEMGREP_APP_TOKEN",
     "SEMGREP_DEPLOYMENT_SLUG",
-    "SEMGREP_DEPLOYMENT_ID",
     "MONDAY_API_TOKEN",
     "MONDAY_BOARD_ID_SAST",
     "MONDAY_BOARD_ID_SCA",
@@ -130,6 +154,13 @@ _SEVERITY_LABELS = {
     "LOW": "Low",
 }
 
+_VALIDATION_STATE_LABELS = {
+    "VALIDATION_STATE_NO_VALIDATOR":    "No Validator",
+    "VALIDATION_STATE_CONFIRMED_INVALID": "Invalid",
+    "VALIDATION_STATE_CONFIRMED_VALID":   "Valid",
+    "VALIDATION_STATE_VALIDATION_ERROR":  "Error",
+}
+
 
 # ---------------------------------------------------------------------------
 # SAST mapper
@@ -141,32 +172,33 @@ def sast_finding_to_item(finding: Finding, col_map: dict[str, str]) -> tuple[str
     assistant = raw.get("assistant") or {}
     loc = raw.get("location") or {}
 
-    item_name = f"[{finding.severity}] {finding.rule_name} — {finding.file_path}:{finding.line}"
+    short_name = finding.rule_name.split(".")[-1]
+    item_name = f"{short_name} - {finding.repo} - {finding.file_path}:{finding.line}"
     cv: dict = {}
 
     _set_col(cv, col_map, "Finding ID", finding.id)
-    _set_col(cv, col_map, "Severity", _SEVERITY_LABELS.get(finding.severity, finding.severity.capitalize()))
-    _set_col(cv, col_map, "Confidence", _safe_get(raw, "confidence"))
+    _set_status_col(cv, col_map, "Severity", _SEVERITY_LABELS.get(finding.severity, finding.severity.capitalize()))
+    _set_status_col(cv, col_map, "Confidence", _safe_get(raw, "confidence").capitalize())
     _set_col(cv, col_map, "Rule", finding.rule_name)
-    _set_col(cv, col_map, "Triage State", _safe_get(raw, "triage_state"))
+    _set_status_col(cv, col_map, "Triage State", _snake_to_title(_safe_get(raw, "triage_state")))
     _set_col(cv, col_map, "File", f"{finding.file_path}:{finding.line}")
     _set_col(cv, col_map, "End Location", f"{loc.get('end_line', '')}:{loc.get('end_column', '')}")
     _set_col(cv, col_map, "Repo", finding.repo)
-    _set_col(cv, col_map, "Categories", _join_list(raw.get("categories")))
+    _set_dropdown_col(cv, col_map, "Categories", raw.get("categories"))
     _set_col(cv, col_map, "CWE", _join_list(rule.get("cwe_names")))
-    _set_col(cv, col_map, "OWASP", _join_list(rule.get("owasp_names")))
-    _set_col(cv, col_map, "Vuln Classes", _join_list(rule.get("vulnerability_classes")))
+    _set_dropdown_col(cv, col_map, "OWASP", rule.get("owasp_names"))
+    _set_dropdown_col(cv, col_map, "Vuln Classes", rule.get("vulnerability_classes"))
     _set_col(cv, col_map, "Message", _truncate(_safe_get(raw, "rule_message")))
-    _set_col(cv, col_map, "AI Verdict", _safe_get(assistant, "autotriage", "verdict"))
+    _set_status_col(cv, col_map, "AI Verdict", _snake_to_title(_safe_get(assistant, "autotriage", "verdict")) or "Not analyzed")
     _set_col(cv, col_map, "AI Reason", _truncate(_safe_get(assistant, "autotriage", "reason")))
     _set_col(cv, col_map, "AI Guidance", _truncate(_safe_get(assistant, "guidance", "summary")))
     autofix = _safe_get(assistant, "autofix", "fix_code")
-    _set_col(cv, col_map, "Has Autofix", "Yes" if autofix else "No")
+    _set_status_col(cv, col_map, "Has Autofix", "Yes" if autofix else "No")
     comp_tag = _safe_get(assistant, "component", "tag")
     comp_risk = _safe_get(assistant, "component", "risk")
-    _set_col(cv, col_map, "Component", f"{comp_tag} ({comp_risk})" if comp_tag else "")
-    _set_col(cv, col_map, "Code URL", _safe_get(raw, "line_of_code_url"))
-    _set_col(cv, col_map, "Sourcing Policy", _safe_get(raw, "sourcing_policy", "name"))
+    _set_status_col(cv, col_map, "Component", f"{comp_tag} ({comp_risk})" if comp_tag else "")
+    _set_link_col(cv, col_map, "Code URL", _safe_get(raw, "line_of_code_url"))
+    _set_status_col(cv, col_map, "Sourcing Policy", _safe_get(raw, "sourcing_policy", "name"))
     _set_col(cv, col_map, "External Ticket", _safe_get(raw, "external_ticket"))
     _set_col(cv, col_map, "Rule Explanation", _truncate(_safe_get(assistant, "rule_explanation", "summary")))
     # Semgrep URL is injected by run() which has access to the deployment slug
@@ -183,32 +215,37 @@ def sca_finding_to_item(finding: Finding, col_map: dict[str, str]) -> tuple[str,
     dep = raw.get("found_dependency") or {}
     epss = raw.get("epss_score") or {}
 
-    item_name = f"[{finding.severity}] {finding.rule_name} — {finding.file_path}:{finding.line}"
+    rule_obj = raw.get("rule") or {}
+    dep_name = _safe_get(dep, "package")
+    vuln_classes = rule_obj.get("vulnerability_classes") or []
+    vuln_class = vuln_classes[0] if vuln_classes else ""
+    sca_title = f"{dep_name}: {vuln_class}" if vuln_class else dep_name
+    item_name = f"{sca_title} - {finding.repo} - {finding.file_path}:{finding.line}"
     cv: dict = {}
 
     _set_col(cv, col_map, "Finding ID", finding.id)
-    _set_col(cv, col_map, "Severity", _SEVERITY_LABELS.get(finding.severity, finding.severity.capitalize()))
-    _set_col(cv, col_map, "Confidence", _safe_get(raw, "confidence"))
+    _set_status_col(cv, col_map, "Severity", _SEVERITY_LABELS.get(finding.severity, finding.severity.capitalize()))
+    _set_status_col(cv, col_map, "Confidence", _safe_get(raw, "confidence").capitalize())
     _set_col(cv, col_map, "Rule", finding.rule_name)
-    _set_col(cv, col_map, "Triage State", _safe_get(raw, "triage_state"))
+    _set_status_col(cv, col_map, "Triage State", _snake_to_title(_safe_get(raw, "triage_state")))
     _set_col(cv, col_map, "File", f"{finding.file_path}:{finding.line}")
     _set_col(cv, col_map, "Repo", finding.repo)
     _set_col(cv, col_map, "CVE", _safe_get(raw, "vulnerability_identifier"))
-    _set_col(cv, col_map, "Reachability", _safe_get(raw, "reachability"))
+    _set_status_col(cv, col_map, "Reachability", _safe_get(raw, "reachability").capitalize())
     _set_col(cv, col_map, "Reachable Condition", _truncate(_safe_get(raw, "reachable_condition")))
     _set_col(cv, col_map, "EPSS Score", str(epss.get("score", "")) if epss.get("score") is not None else "")
     _set_col(cv, col_map, "EPSS Percentile", str(epss.get("percentile", "")) if epss.get("percentile") is not None else "")
     _set_col(cv, col_map, "Package", _safe_get(dep, "package"))
     _set_col(cv, col_map, "Version", _safe_get(dep, "version"))
-    _set_col(cv, col_map, "Ecosystem", _safe_get(dep, "ecosystem"))
-    _set_col(cv, col_map, "Transitivity", _safe_get(dep, "transitivity"))
+    _set_status_col(cv, col_map, "Ecosystem", _safe_get(dep, "ecosystem"))
+    _set_status_col(cv, col_map, "Transitivity", _safe_get(dep, "transitivity").capitalize())
     fix_recs = raw.get("fix_recommendations") or []
     _set_col(cv, col_map, "Fix Recommendation", ", ".join(f"{r['package']}@{r['version']}" for r in fix_recs if isinstance(r, dict)))
-    _set_col(cv, col_map, "Is Malicious", "Yes" if raw.get("is_malicious") else "No")
+    _set_status_col(cv, col_map, "Is Malicious", "Yes" if raw.get("is_malicious") else "No")
     _set_col(cv, col_map, "Lockfile URL", _safe_get(dep, "lockfile_line_url"))
     _set_col(cv, col_map, "Message", _truncate(_safe_get(raw, "rule_message")))
-    _set_col(cv, col_map, "Categories", _join_list(raw.get("categories")))
-    _set_col(cv, col_map, "Code URL", _safe_get(raw, "line_of_code_url"))
+    _set_dropdown_col(cv, col_map, "Categories", raw.get("categories"))
+    _set_link_col(cv, col_map, "Code URL", _safe_get(raw, "line_of_code_url"))
     # Semgrep URL is injected by run() which has access to the deployment slug
 
     return item_name, cv
@@ -221,32 +258,34 @@ def sca_finding_to_item(finding: Finding, col_map: dict[str, str]) -> tuple[str,
 def secrets_finding_to_item(finding: Finding, col_map: dict[str, str]) -> tuple[str, dict]:
     raw = finding.raw
 
-    item_name = f"[{finding.severity}] {finding.rule_name} — {finding.file_path}:{finding.line}"
+    item_name = f"{finding.rule_name} - {finding.repo} - {finding.file_path}:{finding.line}"
     cv: dict = {}
 
     _set_col(cv, col_map, "Finding ID", finding.id)
-    _set_col(cv, col_map, "Severity", _SEVERITY_LABELS.get(finding.severity, finding.severity.capitalize()))
+    _set_status_col(cv, col_map, "Severity", _SEVERITY_LABELS.get(finding.severity, finding.severity.capitalize()))
     _set_col(cv, col_map, "Rule", finding.rule_name)
-    _set_col(cv, col_map, "Triage State", _safe_get(raw, "triage_state"))
-    _set_col(cv, col_map, "Validation State", _safe_get(raw, "validation_state"))
+    _set_status_col(cv, col_map, "Triage State", _snake_to_title(_safe_get(raw, "triageState")))
+    raw_val_state = _safe_get(raw, "validationState")
+    _set_status_col(cv, col_map, "Validation State", _VALIDATION_STATE_LABELS.get(raw_val_state, raw_val_state))
     _set_col(cv, col_map, "File", f"{finding.file_path}:{finding.line}")
     _set_col(cv, col_map, "Repo", finding.repo)
-    _set_col(cv, col_map, "Confidence", _safe_get(raw, "confidence"))
-    _set_col(cv, col_map, "Categories", _join_list(raw.get("categories")))
-    _set_col(cv, col_map, "Message", _truncate(_safe_get(raw, "rule_message")))
-    _set_col(cv, col_map, "Code URL", _safe_get(raw, "line_of_code_url"))
-    _set_col(cv, col_map, "External Ticket", _safe_get(raw, "external_ticket"))
+    raw_conf = (_safe_get(raw, "confidence") or "").upper()
+    if raw_conf.startswith("CONFIDENCE_"):
+        raw_conf = raw_conf[len("CONFIDENCE_"):]
+    _set_status_col(cv, col_map, "Confidence", raw_conf.capitalize())
+    _set_link_col(cv, col_map, "Code URL", _safe_get(raw, "findingPathUrl"))
+    _set_col(cv, col_map, "External Ticket", _safe_get(raw, "externalTicket"))
     # Semgrep URL is injected by run() which has access to the deployment slug
 
     return item_name, cv
 
 
 # ---------------------------------------------------------------------------
-# Update body formatters (posted to Monday.com Updates feed after item creation)
+# Update body formatters (posted to monday.com Updates feed after item creation)
 # ---------------------------------------------------------------------------
 
 def format_update_body_sast(finding: Finding) -> str:
-    """HTML update body for a SAST finding — posted to the Monday.com Updates feed."""
+    """HTML update body for a SAST finding — posted to the monday.com Updates feed."""
     raw = finding.raw
     rule = raw.get("rule") or {}
     assistant = raw.get("assistant") or {}
@@ -269,13 +308,13 @@ def format_update_body_sast(finding: Finding) -> str:
     comp_risk = _safe_get(assistant, "component", "risk")
     comp_str = f"{comp_tag} (risk: {comp_risk})" if comp_tag else ""
     meta = [
-        _fmt_field("AI Verdict", _safe_get(assistant, "autotriage", "verdict")),
+        _fmt_field("AI Verdict", _snake_to_title(_safe_get(assistant, "autotriage", "verdict")) or "Not analyzed"),
         _fmt_field("AI Reason", _safe_get(assistant, "autotriage", "reason")),
         _fmt_field("CWE", _join_list(rule.get("cwe_names"))),
         _fmt_field("OWASP", _join_list(rule.get("owasp_names"))),
         _fmt_field("Vulnerability Classes", _join_list(rule.get("vulnerability_classes"))),
         _fmt_field("Component", comp_str),
-        _fmt_field("Triage State", _safe_get(raw, "triage_state")),
+        _fmt_field("Triage State", _snake_to_title(_safe_get(raw, "triage_state"))),
         _fmt_field("Confidence", _safe_get(raw, "confidence")),
         _fmt_field("Categories", _join_list(raw.get("categories"))),
         _fmt_field("Sourcing Policy", _safe_get(raw, "sourcing_policy", "name")),
@@ -302,7 +341,7 @@ def format_update_body_sast(finding: Finding) -> str:
 
 
 def format_update_body_sca(finding: Finding) -> str:
-    """HTML update body for an SCA finding — posted to the Monday.com Updates feed."""
+    """HTML update body for an SCA finding — posted to the monday.com Updates feed."""
     raw = finding.raw
     dep = raw.get("found_dependency") or {}
     epss = raw.get("epss_score") or {}
@@ -329,17 +368,17 @@ def format_update_body_sca(finding: Finding) -> str:
         else str(epss_score) if epss_score is not None else ""
     )
     fields = [
-        _fmt_field("Reachability", _safe_get(raw, "reachability")),
+        _fmt_field("Reachability", _safe_get(raw, "reachability").capitalize()),
         _fmt_field("Reachable Condition", _safe_get(raw, "reachable_condition")),
         _fmt_field("EPSS Score", epss_str),
         _fmt_field("Package", pkg),
         _fmt_field("Version", ver),
         _fmt_field("Ecosystem", eco),
-        _fmt_field("Transitivity", _safe_get(dep, "transitivity")),
+        _fmt_field("Transitivity", _safe_get(dep, "transitivity").capitalize()),
         _fmt_field("Fix Recommendation", fix_str),
         _fmt_field("Is Malicious", "Yes" if raw.get("is_malicious") else "No"),
         _fmt_field("Lockfile URL", _safe_get(dep, "lockfile_line_url")),
-        _fmt_field("Triage State", _safe_get(raw, "triage_state")),
+        _fmt_field("Triage State", _snake_to_title(_safe_get(raw, "triage_state"))),
         _fmt_field("Confidence", _safe_get(raw, "confidence")),
         _fmt_field("Categories", _join_list(raw.get("categories"))),
     ]
@@ -351,7 +390,7 @@ def format_update_body_sca(finding: Finding) -> str:
 
 
 def format_update_body_secrets(finding: Finding) -> str:
-    """HTML update body for a Secrets finding — posted to the Monday.com Updates feed."""
+    """HTML update body for a Secrets finding — posted to the monday.com Updates feed."""
     raw = finding.raw
 
     # --- Header ---
@@ -361,13 +400,16 @@ def format_update_body_secrets(finding: Finding) -> str:
     ]
 
     # --- Details ---
+    raw_vs = _safe_get(raw, "validationState")
+    raw_conf = (_safe_get(raw, "confidence") or "").upper()
+    if raw_conf.startswith("CONFIDENCE_"):
+        raw_conf = raw_conf[len("CONFIDENCE_"):]
     fields = [
-        _fmt_field("Validation State", _safe_get(raw, "validation_state")),
-        _fmt_field("Confidence", _safe_get(raw, "confidence")),
-        _fmt_field("Triage State", _safe_get(raw, "triage_state")),
-        _fmt_field("Categories", _join_list(raw.get("categories"))),
-        _fmt_field("Code URL", _safe_get(raw, "line_of_code_url")),
-        _fmt_field("External Ticket", _safe_get(raw, "external_ticket")),
+        _fmt_field("Validation State", _VALIDATION_STATE_LABELS.get(raw_vs, raw_vs)),
+        _fmt_field("Confidence", raw_conf.capitalize()),
+        _fmt_field("Triage State", _snake_to_title(_safe_get(raw, "triageState"))),
+        _fmt_field("Code URL", _safe_get(raw, "findingPathUrl")),
+        _fmt_field("External Ticket", _safe_get(raw, "externalTicket")),
     ]
     detail_block = "<br>".join(f for f in fields if f)
     if detail_block:
@@ -416,7 +458,6 @@ def run(state_path: Path = DEFAULT_STATE_FILE, limit: int | None = None) -> None
     semgrep = SemgrepClient(
         token=cfg["SEMGREP_APP_TOKEN"],
         deployment_slug=slug,
-        deployment_id=cfg["SEMGREP_DEPLOYMENT_ID"],
     )
 
     boards: dict[str, dict] = {}
@@ -435,7 +476,7 @@ def run(state_path: Path = DEFAULT_STATE_FILE, limit: int | None = None) -> None
     try:
         sast = semgrep.fetch_findings("sast", **fetch_kwargs)
         sca = semgrep.fetch_findings("sca", **fetch_kwargs)
-        secrets = semgrep.fetch_secrets()
+        secrets = semgrep.fetch_secrets(**fetch_kwargs)
     except SemgrepAPIError as exc:
         print(f"Semgrep API error: {exc}")
         sys.exit(1)
@@ -467,7 +508,7 @@ def run(state_path: Path = DEFAULT_STATE_FILE, limit: int | None = None) -> None
 
         for finding in new:
             item_name, col_vals = mapper(finding, col_map)
-            _set_col(col_vals, col_map, "Semgrep URL", _semgrep_finding_url(slug, finding))
+            _set_link_col(col_vals, col_map, "Semgrep URL", _semgrep_finding_url(slug, finding))
             try:
                 monday_id, _ = board["client"].create_item(item_name, col_vals)
                 state["synced"][finding.id] = {
@@ -476,7 +517,7 @@ def run(state_path: Path = DEFAULT_STATE_FILE, limit: int | None = None) -> None
                 }
                 state["daily"][today] += 1
                 created += 1
-                print(f"  [{board_type}] {finding.id} → Monday item {monday_id}")
+                print(f"  [{board_type}] {finding.id} → monday item {monday_id}")
                 try:
                     body = body_formatter(finding)
                     board["client"].create_update(monday_id, body)
@@ -491,7 +532,7 @@ def run(state_path: Path = DEFAULT_STATE_FILE, limit: int | None = None) -> None
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Sync Semgrep findings to Monday.com")
+    parser = argparse.ArgumentParser(description="Sync Semgrep findings to monday.com")
     parser.add_argument("--limit", type=int, default=None, metavar="N", help="Max findings per type")
     args = parser.parse_args()
     run(limit=args.limit)

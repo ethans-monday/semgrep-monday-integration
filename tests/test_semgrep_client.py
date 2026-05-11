@@ -12,12 +12,15 @@ TOKEN = "test-token"
 SLUG = "acme-corp"
 DEP_ID = "20169"
 
+DEPLOYMENTS_URL = "https://semgrep.dev/api/v1/deployments"
 FINDINGS_URL = f"https://semgrep.dev/api/v1/deployments/{SLUG}/findings"
 SECRETS_URL = f"https://semgrep.dev/api/v1/deployments/{DEP_ID}/secrets"
 
+DEPLOYMENTS_RESPONSE = {"deployments": [{"id": int(DEP_ID), "slug": SLUG, "name": "Acme Corp"}]}
+
 
 def make_client() -> SemgrepClient:
-    return SemgrepClient(token=TOKEN, deployment_slug=SLUG, deployment_id=DEP_ID)
+    return SemgrepClient(token=TOKEN, deployment_slug=SLUG)
 
 
 def _finding_raw(fid="1", severity="HIGH", issue_type="sast"):
@@ -26,6 +29,17 @@ def _finding_raw(fid="1", severity="HIGH", issue_type="sast"):
         "rule_name": f"rule.{fid}",
         "severity": severity,
         "location": {"file_path": f"src/file{fid}.py", "line": 1},
+        "repository": {"name": "repo"},
+    }
+
+
+def _secret_raw(fid="s1", severity="HIGH"):
+    return {
+        "id": fid,
+        "type": f"SecretType.{fid}",
+        "severity": severity,
+        "findingPath": f"src/file{fid}.py:10",
+        "findingPathUrl": f"https://github.com/org/repo/blob/abc/src/file{fid}.py#L10",
         "repository": {"name": "repo"},
     }
 
@@ -93,27 +107,45 @@ def test_fetch_sca_passes_scan_type(httpx_mock):
 
 def test_fetch_secrets_cursor_pagination(httpx_mock):
     """Follows cursor chain across two pages."""
+    httpx_mock.add_response(url=DEPLOYMENTS_URL, json=DEPLOYMENTS_RESPONSE)
     httpx_mock.add_response(
         url=f"{SECRETS_URL}?limit=100",
-        json={"secrets": [_finding_raw("s1")], "cursor": "cursor-abc"},
+        json={"findings": [_secret_raw("s1")], "cursor": "cursor-abc"},
     )
     httpx_mock.add_response(
         url=f"{SECRETS_URL}?limit=100&cursor=cursor-abc",
-        json={"secrets": [_finding_raw("s2")], "cursor": ""},
+        json={"findings": [_secret_raw("s2")], "cursor": ""},
     )
 
     findings = make_client().fetch_secrets()
     assert len(findings) == 2
     assert findings[0].id == "s1"
     assert findings[1].id == "s2"
+    assert findings[0].rule_name == "SecretType.s1"
+    assert findings[0].file_path == "src/files1.py"
+    assert findings[0].line == 10
+    assert findings[0].repo == "repo"
     assert all(f.finding_type == "Secrets" for f in findings)
 
 
-def test_fetch_secrets_stops_on_empty_results(httpx_mock):
-    """Stops immediately if the first page returns an empty secrets array."""
+def test_fetch_secrets_severity_normalization(httpx_mock):
+    """SEVERITY_MEDIUM prefix is stripped and uppercased."""
+    httpx_mock.add_response(url=DEPLOYMENTS_URL, json=DEPLOYMENTS_RESPONSE)
     httpx_mock.add_response(
         url=f"{SECRETS_URL}?limit=100",
-        json={"secrets": [], "cursor": "some-cursor"},
+        json={"findings": [_secret_raw("s1", severity="SEVERITY_MEDIUM")], "cursor": ""},
+    )
+
+    findings = make_client().fetch_secrets()
+    assert findings[0].severity == "MEDIUM"
+
+
+def test_fetch_secrets_stops_on_empty_results(httpx_mock):
+    """Stops immediately if the first page returns an empty findings array."""
+    httpx_mock.add_response(url=DEPLOYMENTS_URL, json=DEPLOYMENTS_RESPONSE)
+    httpx_mock.add_response(
+        url=f"{SECRETS_URL}?limit=100",
+        json={"findings": [], "cursor": "some-cursor"},
     )
 
     findings = make_client().fetch_secrets()

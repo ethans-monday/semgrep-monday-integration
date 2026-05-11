@@ -59,7 +59,7 @@ SCA_FINDING = Finding(
 SECRET_FINDING = Finding(
     id="s-2001", rule_name="generic.aws-key", severity="CRITICAL",
     file_path=".env", line=3, repo="my-repo", finding_type="Secrets",
-    raw={"validation_state": "confirmed_valid"},
+    raw={"validationState": "VALIDATION_STATE_CONFIRMED_VALID", "findingPathUrl": "https://github.com/org/repo/blob/abc/.env#L3"},
 )
 
 
@@ -68,7 +68,7 @@ def env_vars(monkeypatch):
     monkeypatch.setattr("sync.load_dotenv", lambda **kw: None)
     monkeypatch.setenv("SEMGREP_APP_TOKEN", "tok")
     monkeypatch.setenv("SEMGREP_DEPLOYMENT_SLUG", "acme")
-    monkeypatch.setenv("SEMGREP_DEPLOYMENT_ID", "12345")
+
     monkeypatch.setenv("MONDAY_API_TOKEN", "mon-tok")
     monkeypatch.setenv("MONDAY_BOARD_ID_SAST", "1001")
     monkeypatch.setenv("MONDAY_BOARD_ID_SCA", "1002")
@@ -201,20 +201,20 @@ def test_all_three_types_routed_to_correct_boards(env_vars, state_file):
 
 def test_sast_mapper_extracts_ai_verdict():
     _, col_vals = sync.sast_finding_to_item(SAST_FINDING, SAST_COL_MAP)
-    assert col_vals[SAST_COL_MAP["AI Verdict"]] == "true_positive"
+    assert col_vals[SAST_COL_MAP["AI Verdict"]] == {"label": "True Positive"}
     assert col_vals[SAST_COL_MAP["CWE"]] == "CWE-79"
 
 
 def test_sca_mapper_extracts_reachability():
     _, col_vals = sync.sca_finding_to_item(SCA_FINDING, SCA_COL_MAP)
     assert col_vals[SCA_COL_MAP["CVE"]] == "CVE-2021-23337"
-    assert col_vals[SCA_COL_MAP["Reachability"]] == "reachable"
+    assert col_vals[SCA_COL_MAP["Reachability"]] == {"label": "Reachable"}
     assert col_vals[SCA_COL_MAP["Package"]] == "lodash"
 
 
 def test_secrets_mapper_extracts_validation():
     _, col_vals = sync.secrets_finding_to_item(SECRET_FINDING, SECRETS_COL_MAP)
-    assert col_vals[SECRETS_COL_MAP["Validation State"]] == "confirmed_valid"
+    assert col_vals[SECRETS_COL_MAP["Validation State"]] == {"label": "Valid"}
 
 
 # ---------------------------------------------------------------------------
@@ -240,7 +240,7 @@ def test_missing_env_var_exits_early(tmp_path, monkeypatch):
     monkeypatch.setattr("sync.load_dotenv", lambda **kw: None)
     monkeypatch.setenv("SEMGREP_APP_TOKEN", "tok")
     monkeypatch.setenv("SEMGREP_DEPLOYMENT_SLUG", "acme")
-    monkeypatch.setenv("SEMGREP_DEPLOYMENT_ID", "12345")
+
     monkeypatch.setenv("MONDAY_API_TOKEN", "mon-tok")
     monkeypatch.delenv("MONDAY_BOARD_ID_SAST", raising=False)
     monkeypatch.delenv("MONDAY_BOARD_ID_SCA", raising=False)
@@ -292,7 +292,7 @@ def test_semgrep_url_injected_into_column_values(env_vars, state_file):
         sync.run(state_path=state_file)
 
     _, col_vals = mondays["SAST"].create_item.call_args[0]
-    assert col_vals.get("text_semgrep_url", "").startswith(
-        "https://semgrep.dev/orgs/acme/findings/"
-    )
-    assert "1001" in col_vals["text_semgrep_url"]
+    link = col_vals.get("text_semgrep_url", {})
+    assert isinstance(link, dict)
+    assert link.get("url", "").startswith("https://semgrep.dev/orgs/acme/findings/")
+    assert "1001" in link["url"]

@@ -1,4 +1,4 @@
-"""Monday.com GraphQL API client.
+"""monday.com GraphQL API client.
 
 Key behaviours enforced here:
   - API-Version: 2025-04 header on every request (older versions deprecated Feb 2026)
@@ -89,11 +89,11 @@ class MondayClient:
         """Post a text update (comment) to an item's Updates panel.
 
         Args:
-            item_id: The Monday.com item ID returned by create_item.
+            item_id: The monday.com item ID returned by create_item.
             body:    Plain text or HTML string shown in the Updates section.
 
         Returns:
-            The Monday.com update ID.
+            The monday.com update ID.
         """
         mutation = """
         mutation ($itemId: ID!, $body: String!) {
@@ -118,7 +118,7 @@ class MondayClient:
         """
         mutation = """
         mutation ($boardId: ID!, $itemName: String!, $colVals: JSON!) {
-          create_item(board_id: $boardId, item_name: $itemName, column_values: $colVals) {
+          create_item(board_id: $boardId, item_name: $itemName, column_values: $colVals, create_labels_if_missing: true) {
             id
           }
         }

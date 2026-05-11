@@ -1,4 +1,4 @@
-"""AWS Lambda handler for Semgrep → Monday.com sync.
+"""AWS Lambda handler for Semgrep → monday.com sync.
 
 Reads credentials from AWS Secrets Manager instead of .env.
 State is stored in /tmp/state.json (ephemeral) by default.

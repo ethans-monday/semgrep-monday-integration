@@ -3,6 +3,12 @@
 Handles two distinct endpoints with different pagination schemes:
   - /findings  (SAST + SCA)  — offset-based pagination (page / page_size)
   - /secrets                  — cursor-based pagination (cursor / limit)
+
+The /secrets endpoint has a different response schema from /findings:
+  - top-level key is "findings" (not "secrets")
+  - rule name is in "type" (not "rule_name")
+  - location is in "findingPath" as "file:line" (not a nested "location" object)
+  - code URL is in "findingPathUrl"
 """
 
 from dataclasses import dataclass
@@ -29,7 +35,7 @@ class Finding:
 
 
 class SemgrepClient:
-    def __init__(self, token: str, deployment_slug: str, deployment_id: str) -> None:
+    def __init__(self, token: str, deployment_slug: str, deployment_id: str | None = None) -> None:
         self._slug = deployment_slug
         self._dep_id = deployment_id
         self._headers = {"Authorization": f"Bearer {token}"}
@@ -46,6 +52,15 @@ class SemgrepClient:
             )
         return response.json()
 
+    def _fetch_deployment_id(self) -> str:
+        """Discover the numeric deployment ID for the configured slug."""
+        url = f"{SEMGREP_BASE}/deployments"
+        data = self._get(url)
+        for dep in data.get("deployments", []):
+            if dep.get("slug") == self._slug:
+                return str(dep["id"])
+        raise SemgrepAPIError(f"No deployment found with slug '{self._slug}'")
+
     @staticmethod
     def _parse_finding(raw: dict, finding_type: str) -> Finding:
         location = raw.get("location") or {}
@@ -61,6 +76,29 @@ class SemgrepClient:
             raw=raw,
         )
 
+    @staticmethod
+    def _parse_secret_finding(raw: dict) -> Finding:
+        """Parse a finding from the /secrets endpoint (different schema from /findings)."""
+        finding_path = raw.get("findingPath", "")
+        parts = finding_path.rsplit(":", 1)
+        file_path = parts[0] if parts else ""
+        line = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+
+        raw_sev = (raw.get("severity") or "UNKNOWN").upper()
+        if raw_sev.startswith("SEVERITY_"):
+            raw_sev = raw_sev[len("SEVERITY_"):]
+
+        return Finding(
+            id=str(raw["id"]),
+            rule_name=raw.get("type", ""),
+            severity=raw_sev,
+            file_path=file_path,
+            line=line,
+            repo=(raw.get("repository") or {}).get("name", ""),
+            finding_type="Secrets",
+            raw=raw,
+        )
+
     # ------------------------------------------------------------------
     # Public API
     # ------------------------------------------------------------------
@@ -71,7 +109,7 @@ class SemgrepClient:
         Args:
             issue_type: ``"sast"`` or ``"sca"``
             max_findings: Stop after collecting this many findings (default 100).
-                          Keeps each run within Monday.com free-tier call budget.
+                          Keeps each run within monday.com free-tier call budget.
         """
         url = f"{SEMGREP_BASE}/deployments/{self._slug}/findings"
         label = "SAST" if issue_type == "sast" else "SCA"
@@ -90,29 +128,35 @@ class SemgrepClient:
 
         return results[:max_findings]
 
-    def fetch_secrets(self) -> list[Finding]:
+    def fetch_secrets(self, max_findings: int = 10_000) -> list[Finding]:
         """Fetch Secrets findings using cursor pagination.
 
-        Uses the numeric deployment ID (not the slug).
+        Uses the numeric deployment ID (not the slug), discovered automatically if not provided.
+        The /secrets endpoint returns {"findings": [...], "cursor": "..."} — note the key
+        is "findings", not "secrets", and each item uses a different schema from /findings.
         """
+        if not self._dep_id:
+            self._dep_id = self._fetch_deployment_id()
         url = f"{SEMGREP_BASE}/deployments/{self._dep_id}/secrets"
         results: list[Finding] = []
         cursor: str | None = None
 
-        while True:
-            params: dict = {"limit": 100}
+        while len(results) < max_findings:
+            remaining = max_findings - len(results)
+            page_size = min(100, remaining)
+            params: dict = {"limit": page_size}
             if cursor:
                 params["cursor"] = cursor
 
             data = self._get(url, params)
-            batch = data.get("secrets", [])
+            batch = data.get("findings", [])
             if not batch:
                 break
 
-            results.extend(self._parse_finding(f, "Secrets") for f in batch)
+            results.extend(self._parse_secret_finding(f) for f in batch)
 
             cursor = data.get("cursor", "")
             if not cursor:
                 break
 
-        return results
+        return results[:max_findings]

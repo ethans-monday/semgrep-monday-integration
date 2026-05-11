@@ -1,4 +1,4 @@
-# Agent Guide: Semgrep to Monday.com Sync
+# Agent Guide: Semgrep to monday.com Sync
 
 This document describes how `sync.py` behaves when run autonomously (cron, Lambda, CI pipeline).
 
@@ -20,21 +20,21 @@ MONDAY_BOARD_ID_SECRETS
 
 1. Fetches all open findings from Semgrep (SAST, SCA, Secrets).
 2. Loads `state.json` for deduplication. Findings already synced are skipped.
-3. For each new finding, creates a Monday.com item on the appropriate board with all available metadata and a deep-link to the finding in the Semgrep Cloud UI.
+3. For each new finding, creates a monday.com item on the appropriate board with all available metadata and a deep-link to the finding in the Semgrep Cloud UI.
 4. Immediately after each successful item creation, posts a rich HTML update (finding description, AI remediation guidance, suggested fix code) to the item's Updates feed.
 5. Saves updated state after processing each type.
 
 ## Error handling
 
 - **Semgrep API errors** (auth failure, network) -- script exits with code 1.
-- **Monday.com item creation failure** (per finding) -- logged, finding is NOT added to state, will be retried on next run.
-- **Monday.com update-post failure** (per finding) -- logged as a warning, finding IS written to state (the item exists on the board without the rich update body). Re-running does not re-attempt the missing update.
-- **Monday.com rate limiting (429)** -- automatically retries up to 3 times, respecting the `Retry-After` header.
+- **monday.com item creation failure** (per finding) -- logged, finding is NOT added to state, will be retried on next run.
+- **monday.com update-post failure** (per finding) -- logged as a warning, finding IS written to state (the item exists on the board without the rich update body). Re-running does not re-attempt the missing update.
+- **monday.com rate limiting (429)** -- automatically retries up to 3 times, respecting the `Retry-After` header.
 - **Transient transport errors** (`httpx.ReadError`, `ConnectError`, timeouts) -- caught at both call sites so a single blip does not crash a full sync.
 
 ## API budget per new finding
 
-Each new finding consumes **2** Monday.com API calls: one `create_item` plus one `create_update`. Plus one `get_column_map` query per board per run (cached after first use).
+Each new finding consumes **2** monday.com API calls: one `create_item` plus one `create_update`. Plus one `get_column_map` query per board per run (cached after first use).
 
 A full sync of 1,000 new findings costs roughly 2,003 calls. Idempotent re-runs only spend calls on findings that haven't been synced before.
 

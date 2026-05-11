@@ -1,4 +1,4 @@
-"""Create three Monday.com boards for Semgrep findings (SAST, SCA, Secrets).
+"""Create three monday.com boards for Semgrep findings (SAST, SCA, Secrets).
 
 Usage:
     python setup_boards.py                       # default workspace
@@ -8,6 +8,7 @@ Prints .env lines for the new board IDs at the end.
 """
 
 import argparse
+import json
 import os
 import sys
 import time
@@ -80,12 +81,31 @@ BOARD_COLUMNS: dict[str, list[str]] = {
         "File",
         "Repo",
         "Confidence",
-        "Categories",
-        "Message",
         "Code URL",
         "Semgrep URL",
         "External Ticket",
     ],
+}
+
+COLUMN_TYPES: dict[str, str] = {
+    "Severity":         "status",
+    "Confidence":       "status",
+    "Triage State":     "status",
+    "Validation State": "status",
+    "Reachability":     "status",
+    "Ecosystem":        "status",
+    "Transitivity":     "status",
+    "Is Malicious":     "status",
+    "Sourcing Policy":  "status",
+    "Component":        "status",
+    "Has Autofix":      "status",
+    "AI Guidance":      "text",
+    "AI Verdict":       "status",
+    "Categories":       "dropdown",
+    "Vuln Classes":     "dropdown",
+    "OWASP":            "dropdown",
+    "Semgrep URL":      "link",
+    "Code URL":         "link",
 }
 
 
@@ -97,23 +117,42 @@ def create_board(client: MondayClient, name: str, workspace_id: int | None) -> s
     return data["data"]["create_board"]["id"]
 
 
+def clear_default_items(client: MondayClient, board_id: str) -> None:
+    """Delete any items auto-created by monday.com (e.g. 'Task 1') on a new board."""
+    query = """
+    query ($boardId: [ID!]) {
+      boards(ids: $boardId) {
+        items_page { items { id name } }
+      }
+    }
+    """
+    data = client._post(query, {"boardId": [board_id]})
+    items = data["data"]["boards"][0]["items_page"]["items"]
+    for item in items:
+        mutation = "mutation ($itemId: ID!) { delete_item(item_id: $itemId) { id } }"
+        client._post(mutation, {"itemId": item["id"]})
+        print(f"    Deleted default item '{item['name']}' ({item['id']})")
+
+
 def create_columns(client: MondayClient, board_id: str, columns: list[str]) -> None:
-    """Create text columns on a board."""
+    """Create columns on a board, using type from COLUMN_TYPES (default: text)."""
     for title in columns:
+        col_type = COLUMN_TYPES.get(title, "text")
         query = """
-        mutation ($boardId: ID!, $title: String!) {
-          create_column(board_id: $boardId, title: $title, column_type: text) { id title }
+        mutation ($boardId: ID!, $title: String!, $colType: ColumnType!, $defaults: JSON) {
+          create_column(board_id: $boardId, title: $title, column_type: $colType, defaults: $defaults) { id title }
         }
         """
-        data = client._post(query, {"boardId": board_id, "title": title})
+        defaults = json.dumps({"labels": {}}) if col_type == "status" else json.dumps({})
+        data = client._post(query, {"boardId": board_id, "title": title, "colType": col_type, "defaults": defaults})
         col = data["data"]["create_column"]
-        print(f"    {col['title']} ({col['id']})")
+        print(f"    {col['title']} ({col['id']}) [{col_type}]")
         time.sleep(0.3)  # gentle rate limiting for column creation
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Create Monday.com boards for Semgrep findings")
-    parser.add_argument("--workspace", type=int, default=None, help="Monday.com workspace ID")
+    parser = argparse.ArgumentParser(description="Create monday.com boards for Semgrep findings")
+    parser.add_argument("--workspace", type=int, default=None, help="monday.com workspace ID")
     args = parser.parse_args()
 
     load_dotenv(override=True)
@@ -133,6 +172,7 @@ def main():
         board_id = create_board(client, board_name, args.workspace)
         board_ids[board_type] = board_id
         print(f"  Board ID: {board_id}")
+        clear_default_items(client, board_id)
         create_columns(client, board_id, columns)
 
     print("\n" + "=" * 50)

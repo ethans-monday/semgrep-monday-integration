@@ -1,9 +1,9 @@
-# Semgrep to Monday.com Integration
+# Semgrep to monday.com Integration
 
-Syncs security findings from the Semgrep Cloud Platform to Monday.com boards. Findings are separated into three dedicated boards with type-specific columns that preserve full context from the Semgrep API. Each new item also gets a rich HTML post in the Monday.com Updates feed containing the AI-generated finding narrative, remediation guidance, and suggested fix code.
+Syncs security findings from the Semgrep Cloud Platform to monday.com boards. Findings are separated into three dedicated boards with type-specific columns that preserve full context from the Semgrep API. Each new item also gets a rich HTML post in the monday.com Updates feed containing the AI-generated finding narrative, remediation guidance, and suggested fix code.
 
 ```
-Semgrep Cloud API  -->  sync.py  -->  Monday.com GraphQL API
+Semgrep Cloud API  -->  sync.py  -->  monday.com GraphQL API
   /findings (SAST)                      SAST Findings board   (+ Updates feed)
   /findings (SCA)                       SCA Findings board    (+ Updates feed)
   /secrets                              Secrets Findings board (+ Updates feed)
@@ -32,7 +32,7 @@ After creating each board item, the script posts an HTML update to the item's Up
 
 - Python 3.10+
 - A Semgrep Cloud Platform account (Team or Enterprise tier for API access)
-- A Monday.com account (any tier — see rate-limit notes below)
+- A monday.com account (any tier — see rate-limit notes below)
 
 ## Setup Guide
 
@@ -51,10 +51,10 @@ pip install -r requirements.txt
 2. **Deployment ID** (numeric) -- go to Semgrep Cloud > Settings > Deployment. The numeric ID appears in the URL or on the page.
 3. **API token** -- go to Semgrep Cloud > Settings > Tokens > Generate new token. Select the **Web API** scope.
 
-### 3. Get your Monday.com credentials
+### 3. Get your monday.com credentials
 
 1. **API token** -- click your avatar > Developers > My access tokens. Copy the personal API token.
-2. **Workspace ID** (optional) -- visible in your Monday.com URL: `your-org.monday.com/workspaces/<id>`. Only needed if you have multiple workspaces and want boards created in a specific one.
+2. **Workspace ID** (optional) -- visible in your monday.com URL: `your-org.monday.com/workspaces/<id>`. Only needed if you have multiple workspaces and want boards created in a specific one.
 
 ### 4. Create your .env file
 
@@ -62,9 +62,9 @@ pip install -r requirements.txt
 cp .env.example .env
 ```
 
-Edit `.env` and fill in your Semgrep credentials and Monday.com API token. Leave the board IDs empty for now.
+Edit `.env` and fill in your Semgrep credentials and monday.com API token. Leave the board IDs empty for now.
 
-### 5. Create Monday.com boards
+### 5. Create monday.com boards
 
 ```bash
 python setup_boards.py                        # default workspace
@@ -87,7 +87,7 @@ python sync.py --limit 50   # sync up to 50 per type (for testing)
 | `SEMGREP_APP_TOKEN` | Semgrep API token (Web API scope) |
 | `SEMGREP_DEPLOYMENT_SLUG` | Your org slug from `semgrep.dev/orgs/<slug>` |
 | `SEMGREP_DEPLOYMENT_ID` | Numeric deployment ID (used for /secrets endpoint) |
-| `MONDAY_API_TOKEN` | Monday.com personal API token |
+| `MONDAY_API_TOKEN` | monday.com personal API token |
 | `MONDAY_BOARD_ID_SAST` | Board ID for SAST findings |
 | `MONDAY_BOARD_ID_SCA` | Board ID for SCA findings |
 | `MONDAY_BOARD_ID_SECRETS` | Board ID for Secrets findings |
@@ -105,7 +105,7 @@ Use `--limit N` to cap the number of findings fetched per type. Useful for initi
 ### State file
 
 `state.json` stores:
-- `synced` -- mapping of Semgrep finding ID to Monday.com item ID and board type
+- `synced` -- mapping of Semgrep finding ID to monday.com item ID and board type
 - `daily` -- API call count per day (informational)
 - `version` -- state format version (currently 2)
 
@@ -113,7 +113,7 @@ To re-sync everything, delete `state.json` and run again.
 
 ### Error resilience
 
-- If a Monday.com item creation fails, the finding is **not** written to state and will be retried on the next run.
+- If a monday.com item creation fails, the finding is **not** written to state and will be retried on the next run.
 - If the item was created but posting the Updates-feed body fails (transient network error, etc.), a warning is logged and the item is still persisted to state. The item exists on the board without the rich update body.
 
 ## Testing
@@ -160,9 +160,9 @@ The template defaults to `/tmp/state.json`, which is ephemeral (lost on cold sta
 
 ## API Limits and Rate Limiting
 
-The script handles Monday.com rate limiting automatically by respecting the `Retry-After` header on 429 responses (retries up to 3 times).
+The script handles monday.com rate limiting automatically by respecting the `Retry-After` header on 429 responses (retries up to 3 times).
 
-### Monday.com daily API limits by plan
+### monday.com daily API limits by plan
 
 | Plan | Daily limit |
 |---|---|
@@ -171,7 +171,7 @@ The script handles Monday.com rate limiting automatically by respecting the `Ret
 | Pro | 10,000 |
 | Enterprise | 25,000 |
 
-**API calls per new finding:** each finding creates **two** Monday.com calls (one `create_item`, one `create_update`). A full sync of 1,000 new findings costs roughly **2,003 API calls** (3 column-map queries + 1,000 × 2). Plan your tier and cron cadence accordingly — idempotent re-runs only spend calls on *new* findings.
+**API calls per new finding:** each finding creates **two** monday.com calls (one `create_item`, one `create_update`). A full sync of 1,000 new findings costs roughly **2,003 API calls** (3 column-map queries + 1,000 × 2). Plan your tier and cron cadence accordingly — idempotent re-runs only spend calls on *new* findings.
 
 ### Semgrep API
 
@@ -181,9 +181,9 @@ No documented rate limits for the findings REST API. The script uses reasonable 
 
 **404 on findings endpoint** -- verify your deployment slug is correct. It should match the URL path at `semgrep.dev/orgs/<slug>`, not your org display name.
 
-**Rate limited (429 errors)** -- the script auto-retries up to 3 times, honouring the `Retry-After` header. If you're on a free Monday.com plan with 200 calls/day, use `--limit` to stay within budget.
+**Rate limited (429 errors)** -- the script auto-retries up to 3 times, honouring the `Retry-After` header. If you're on a free monday.com plan with 200 calls/day, use `--limit` to stay within budget.
 
-**Update post failed: ...** -- the Monday.com item was created but the Updates-feed body couldn't be posted (usually a transient network reset). The finding is still recorded in state; only the rich update body is missing. Re-running will not re-attempt the failed update.
+**Update post failed: ...** -- the monday.com item was created but the Updates-feed body couldn't be posted (usually a transient network reset). The finding is still recorded in state; only the rich update body is missing. Re-running will not re-attempt the failed update.
 
 **Empty secrets results** -- the `/secrets` endpoint uses a numeric deployment ID, not the slug. Verify `SEMGREP_DEPLOYMENT_ID` is correct. Also confirm that Secrets scanning is enabled in your Semgrep org.
 

@@ -1,6 +1,6 @@
 """End-to-end integration tests (three-board architecture).
 
-Both Semgrep and Monday.com HTTP calls are intercepted by pytest-httpx.
+Both Semgrep and monday.com HTTP calls are intercepted by pytest-httpx.
 """
 
 import json
@@ -14,8 +14,11 @@ import sync
 TODAY = str(date.today())
 
 SEMGREP_FINDINGS_URL = "https://semgrep.dev/api/v1/deployments/acme-corp/findings"
+SEMGREP_DEPLOYMENTS_URL = "https://semgrep.dev/api/v1/deployments"
 SEMGREP_SECRETS_URL = "https://semgrep.dev/api/v1/deployments/20169/secrets"
 MONDAY_URL = "https://api.monday.com/v2"
+
+DEPLOYMENTS_RESP = {"deployments": [{"id": 20169, "slug": "acme-corp", "name": "Acme Corp"}]}
 
 
 def _columns_resp(titles):
@@ -73,10 +76,11 @@ def _sca_finding(fid, severity="HIGH"):
 
 def _secret_finding(fid, severity="CRITICAL"):
     return {
-        "id": fid, "rule_name": f"secret.{fid}", "severity": severity,
-        "location": {"file_path": ".env", "line": 1},
+        "id": fid, "type": f"secret.{fid}", "severity": severity,
+        "findingPath": ".env:1",
+        "findingPathUrl": f"https://github.com/org/repo/blob/abc/.env#L1",
         "repository": {"name": "acme"},
-        "validation_state": "confirmed_valid",
+        "validationState": "VALIDATION_STATE_CONFIRMED_VALID",
     }
 
 
@@ -85,7 +89,6 @@ def env_vars(monkeypatch):
     monkeypatch.setattr("sync.load_dotenv", lambda **kw: None)
     monkeypatch.setenv("SEMGREP_APP_TOKEN", "tok")
     monkeypatch.setenv("SEMGREP_DEPLOYMENT_SLUG", "acme-corp")
-    monkeypatch.setenv("SEMGREP_DEPLOYMENT_ID", "20169")
     monkeypatch.setenv("MONDAY_API_TOKEN", "mon-tok")
     monkeypatch.setenv("MONDAY_BOARD_ID_SAST", "1001")
     monkeypatch.setenv("MONDAY_BOARD_ID_SCA", "1002")
@@ -110,14 +113,15 @@ def _add_semgrep_pages(httpx_mock, issue_type, findings):
 
 
 def _add_secrets(httpx_mock, secrets):
+    httpx_mock.add_response(url=SEMGREP_DEPLOYMENTS_URL, json=DEPLOYMENTS_RESP)
     httpx_mock.add_response(
         url=f"{SEMGREP_SECRETS_URL}?limit=100",
-        json={"secrets": secrets, "cursor": ""},
+        json={"findings": secrets, "cursor": ""},
     )
 
 
 def _add_monday_responses(httpx_mock, n_sast=0, n_sca=0, n_secrets=0):
-    """Register Monday responses in actual call order: col query → creates per board."""
+    """Register monday responses in actual call order: col query → creates per board."""
     counter = [0]
 
     def next_id():
@@ -216,13 +220,14 @@ def test_secrets_cursor_exhausted(httpx_mock, env_vars, state_file):
     _add_semgrep_pages(httpx_mock, "sast", [])
     _add_semgrep_pages(httpx_mock, "sca", [])
 
+    httpx_mock.add_response(url=SEMGREP_DEPLOYMENTS_URL, json=DEPLOYMENTS_RESP)
     httpx_mock.add_response(
         url=f"{SEMGREP_SECRETS_URL}?limit=100",
-        json={"secrets": [_secret_finding("s1")], "cursor": "abc"},
+        json={"findings": [_secret_finding("s1")], "cursor": "abc"},
     )
     httpx_mock.add_response(
         url=f"{SEMGREP_SECRETS_URL}?limit=100&cursor=abc",
-        json={"secrets": [_secret_finding("s2")], "cursor": ""},
+        json={"findings": [_secret_finding("s2")], "cursor": ""},
     )
 
     _add_monday_responses(httpx_mock, n_secrets=2)
