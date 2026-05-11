@@ -501,8 +501,8 @@ def run(
     print("Fetching Semgrep findings…")
     fetch_kwargs = {} if limit is None else {"max_findings": limit}
     try:
-        sast_raw = semgrep.fetch_findings("sast", extra_params=to_query_params("sast", filters), **fetch_kwargs) if "SAST" in active_types else []
-        sca_raw = semgrep.fetch_findings("sca", extra_params=to_query_params("sca", filters), **fetch_kwargs) if "SCA" in active_types else []
+        sast_raw = semgrep.fetch_findings("sast", extra_params={**to_query_params("sast", filters), "dedup": "true"}, **fetch_kwargs) if "SAST" in active_types else []
+        sca_raw = semgrep.fetch_findings("sca", extra_params={**to_query_params("sca", filters), "dedup": "true"}, **fetch_kwargs) if "SCA" in active_types else []
         secrets_raw = semgrep.fetch_secrets(extra_params=to_query_params("secrets", filters), **fetch_kwargs) if "Secrets" in active_types else []
     except SemgrepAPIError as exc:
         print(f"Semgrep API error: {exc}")
