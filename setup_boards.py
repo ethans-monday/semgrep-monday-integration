@@ -111,9 +111,12 @@ COLUMN_TYPES: dict[str, str] = {
 
 def create_board(client: MondayClient, name: str, workspace_id: int | None) -> str:
     """Create a board and return its ID."""
-    ws_arg = f", workspace_id: {workspace_id}" if workspace_id else ""
-    query = f'mutation {{ create_board(board_name: "{name}", board_kind: public{ws_arg}) {{ id }} }}'
-    data = client._post(query)
+    ws_arg = ", workspace_id: $workspaceId" if workspace_id else ""
+    query = f"mutation ($boardName: String!{', $workspaceId: ID!' if workspace_id else ''}) {{ create_board(board_name: $boardName, board_kind: public{ws_arg}) {{ id }} }}"
+    variables: dict = {"boardName": name}
+    if workspace_id:
+        variables["workspaceId"] = str(workspace_id)
+    data = client._post(query, variables)
     return data["data"]["create_board"]["id"]
 
 
