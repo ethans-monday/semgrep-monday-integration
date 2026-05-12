@@ -97,7 +97,7 @@ COLUMN_TYPES: dict[str, str] = {
     "Transitivity":     "status",
     "Is Malicious":     "status",
     "Sourcing Policy":  "status",
-    "Component":        "status",
+    "Component":        "dropdown",
     "Has Autofix":      "status",
     "AI Guidance":      "text",
     "AI Verdict":       "status",

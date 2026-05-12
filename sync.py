@@ -172,9 +172,17 @@ def _apply_sast_merged_fields(cv: dict, col_map: dict[str, str], group: FindingG
         for v in (rule.get("vulnerability_classes") or []):
             if v not in all_vuln_classes:
                 all_vuln_classes.append(v)
+    all_components = []
+    for f in group.members:
+        tag = _safe_get(f.raw, "assistant", "component", "tag")
+        risk = _safe_get(f.raw, "assistant", "component", "risk")
+        label = f"{tag} ({risk})" if tag else None
+        if label and label not in all_components:
+            all_components.append(label)
     _set_col(cv, col_map, "CWE", _join_list(all_cwes))
     _set_dropdown_col(cv, col_map, "OWASP", all_owasp)
     _set_dropdown_col(cv, col_map, "Vuln Classes", all_vuln_classes)
+    _set_dropdown_col(cv, col_map, "Component", all_components)
 
 
 def _semgrep_finding_url(slug: str, finding: Finding) -> str:
@@ -309,7 +317,8 @@ def sast_finding_to_item(finding: Finding, col_map: dict[str, str]) -> tuple[str
     _set_status_col(cv, col_map, "Has Autofix", "Yes" if autofix else "No")
     comp_tag = _safe_get(assistant, "component", "tag")
     comp_risk = _safe_get(assistant, "component", "risk")
-    _set_status_col(cv, col_map, "Component", f"{comp_tag} ({comp_risk})" if comp_tag else "")
+    comp_label = f"{comp_tag} ({comp_risk})" if comp_tag else None
+    _set_dropdown_col(cv, col_map, "Component", [comp_label] if comp_label else None)
     _set_link_col(cv, col_map, "Code URL", _safe_get(raw, "line_of_code_url"))
     _set_status_col(cv, col_map, "Sourcing Policy", _safe_get(raw, "sourcing_policy", "name"))
     _set_col(cv, col_map, "External Ticket", _safe_get(raw, "external_ticket"))
@@ -606,6 +615,7 @@ def format_update_body_sast_group(group: FindingGroup, slug: str) -> str:
             _fmt_field("CWE", _join_list(rule.get("cwe_names"))),
             _fmt_field("OWASP", _join_list(rule.get("owasp_names"))),
             _fmt_field("Vuln Classes", _join_list(rule.get("vulnerability_classes"))),
+            _fmt_field("Component", _safe_get(assistant, "component", "tag")),
         ]
         explanation = _safe_get(assistant, "rule_explanation", "explanation")
         if explanation:
