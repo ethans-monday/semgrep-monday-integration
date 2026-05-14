@@ -28,6 +28,10 @@
 #     reachability    — [reachable, always_reachable, conditionally_reachable, unreachable, unknown]
 #     transitivity    — [direct, transitive, unknown]
 #     status          — [open, fixed, ignored, reviewing, fixing, provisionally_ignored]
+#     malicious       — [true]  (triggers a second SCA query with is_malicious=true;
+#                        this query runs independently — no other SCA filters are applied
+#                        to it, so all malicious findings are caught regardless of severity
+#                        or reachability. Results are merged with the primary SCA fetch.)
 #
 #   secrets:
 #     severity         — [SEVERITY_HIGH, SEVERITY_CRITICAL, SEVERITY_MEDIUM, SEVERITY_LOW]
@@ -55,6 +59,7 @@
 #   severity: [high, critical]
 #   reachability: [reachable, always_reachable]
 #   transitivity: [direct]
+#   malicious: [true]
 
 # --- Worked example 3: only confirmed-valid secrets ---
 # secrets:
@@ -70,6 +75,7 @@
 #   severity: [high, critical]
 #   reachability: [reachable, always_reachable, conditionally_reachable, unknown]
 #   transitivity: [direct]
+#   malicious: [true]
 
 # secrets:
 #   severity: [SEVERITY_HIGH, SEVERITY_CRITICAL]
@@ -79,4 +85,4 @@
 #   - negation:   !severity: [low]
 #   - numeric:    epss_score_min: 0.5
 #   - substring:  rule_name_contains: [sql, xss]
-#   - boolean:    is_malicious: true, has_fix: true
+#   - boolean:    has_fix: true
