@@ -23,7 +23,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from filters import filter_findings, load_filters, to_query_params
+from filters import filter_findings, has_malicious_filter, load_filters, to_malicious_query_params, to_query_params
 from monday_client import MondayAPIError, MondayClient
 from semgrep_client import Finding, SemgrepAPIError, SemgrepClient
 
@@ -754,6 +754,11 @@ def run(
     try:
         sast_raw = semgrep.fetch_findings("sast", extra_params={**to_query_params("sast", filters), "dedup": "true"}, **fetch_kwargs) if "SAST" in active_types else []
         sca_raw = semgrep.fetch_findings("sca", extra_params={**to_query_params("sca", filters), "dedup": "true"}, **fetch_kwargs) if "SCA" in active_types else []
+        if "SCA" in active_types and has_malicious_filter(filters):
+            malicious_raw = semgrep.fetch_findings("sca", extra_params={**to_malicious_query_params(), "dedup": "true"}, **fetch_kwargs)
+            seen_ids = {f.id for f in sca_raw}
+            sca_raw.extend(f for f in malicious_raw if f.id not in seen_ids)
+            print(f"  SCA malicious second-pass: {len(malicious_raw)} fetched, {len(sca_raw) - len(seen_ids)} new")
         secrets_raw = semgrep.fetch_secrets(extra_params=to_query_params("secrets", filters), **fetch_kwargs) if "Secrets" in active_types else []
     except SemgrepAPIError as exc:
         print(f"Semgrep API error: {exc}")

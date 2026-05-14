@@ -176,9 +176,12 @@ secrets:
 | `status` | ✓ (open/fixed/ignored/reviewing/fixing/provisionally_ignored) | ✓ | |
 | `reachability` | | ✓ | |
 | `transitivity` | | ✓ | |
+| `malicious` | | ✓ ([true])² | |
 | `validation_state` | | | ✓ |
 
 ¹ `not_analyzed` (and any list that includes it) is applied client-side after fetching — the Semgrep API has no equivalent param for findings where the AI verdict field is absent.
+
+² `malicious: [true]` triggers a second SCA query with only `is_malicious=true` — no other SCA filters (severity, reachability, etc.) are applied to it. Results are merged with the primary SCA fetch and deduplicated.
 
 Filters gate new fetches only — existing items in `state.json` are never modified or removed.
 

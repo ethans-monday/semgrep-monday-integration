@@ -4,7 +4,7 @@ import re
 import pytest
 from pathlib import Path
 
-from filters import load_filters, to_query_params, filter_findings, ALLOWED_FILTERS
+from filters import load_filters, to_query_params, to_malicious_query_params, has_malicious_filter, filter_findings, ALLOWED_FILTERS
 from semgrep_client import SemgrepClient, Finding
 
 TOKEN = "test-token"
@@ -330,6 +330,53 @@ def test_to_query_params_status_sca():
     filters = {"sca": {"status": ["open", "fixed"]}}
     params = to_query_params("sca", filters)
     assert params["status"] == ["open", "fixed"]
+
+
+# ---------------------------------------------------------------------------
+# Malicious filter
+# ---------------------------------------------------------------------------
+
+def test_load_filters_malicious_true(tmp_path):
+    path = _write_yaml(tmp_path, "sca:\n  malicious: [true]\n")
+    result = load_filters(path)
+    assert result["sca"]["malicious"] == ["True"]
+
+
+def test_load_filters_malicious_false_rejected(tmp_path):
+    path = _write_yaml(tmp_path, "sca:\n  malicious: [false]\n")
+    with pytest.raises(ValueError, match="malicious.*must be.*true"):
+        load_filters(path)
+
+
+def test_load_filters_malicious_multiple_rejected(tmp_path):
+    path = _write_yaml(tmp_path, "sca:\n  malicious: [true, false]\n")
+    with pytest.raises(ValueError, match="malicious.*must be.*true"):
+        load_filters(path)
+
+
+def test_to_query_params_excludes_malicious():
+    """malicious is not sent as a regular query param — it triggers a separate fetch."""
+    filters = {"sca": {"severity": ["HIGH"], "malicious": ["true"]}}
+    params = to_query_params("sca", filters)
+    assert "is_malicious" not in params
+    assert "_malicious" not in params
+    assert "malicious" not in params
+    assert params["severities"] == ["HIGH"]
+
+
+def test_has_malicious_filter_true():
+    assert has_malicious_filter({"sca": {"malicious": ["true"], "severity": ["HIGH"]}})
+
+
+def test_has_malicious_filter_false():
+    assert not has_malicious_filter({"sca": {"severity": ["HIGH"]}})
+    assert not has_malicious_filter({})
+
+
+def test_to_malicious_query_params_standalone():
+    """Malicious query params contain only is_malicious — no other filters."""
+    params = to_malicious_query_params()
+    assert params == {"is_malicious": "true"}
 
 
 def test_status_not_allowed_for_secrets(tmp_path):
