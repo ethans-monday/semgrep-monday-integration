@@ -14,7 +14,7 @@ DEP_ID = "20169"
 
 DEPLOYMENTS_URL = "https://semgrep.dev/api/v1/deployments"
 FINDINGS_URL = f"https://semgrep.dev/api/v1/deployments/{SLUG}/findings"
-SECRETS_URL = f"https://semgrep.dev/api/v1/deployments/{DEP_ID}/secrets"
+SECRETS_V2_URL = f"https://semgrep.dev/api/agent/deployments/{DEP_ID}/issues"
 
 DEPLOYMENTS_RESPONSE = {"deployments": [{"id": int(DEP_ID), "slug": SLUG, "name": "Acme Corp"}]}
 
@@ -36,12 +36,20 @@ def _finding_raw(fid="1", severity="HIGH", issue_type="sast"):
 def _secret_raw(fid="s1", severity="HIGH"):
     return {
         "id": fid,
-        "type": f"SecretType.{fid}",
+        "rulePath": f"secrets.type.{fid}",
         "severity": severity,
-        "findingPath": f"src/file{fid}.py:10",
-        "findingPathUrl": f"https://github.com/org/repo/blob/abc/src/file{fid}.py#L10",
+        "confidence": "CONFIDENCE_HIGH",
+        "filePath": f"src/file{fid}.py",
+        "line": 10,
+        "lineOfCodeUrl": f"https://github.com/org/repo/blob/abc/src/file{fid}.py#L10",
         "repository": {"name": "repo"},
+        "triageState": "FINDING_TRIAGE_STATE_UNTRIAGED",
+        "secretsAttributes": {"validationState": "VALIDATION_STATE_NO_VALIDATOR", "secretType": "API Key"},
     }
+
+
+def _v2_issue_wrapper(raw: dict) -> dict:
+    return {"issue": raw, "reviewCount": 0, "allRefs": []}
 
 
 # ---------------------------------------------------------------------------
@@ -102,26 +110,26 @@ def test_fetch_sca_passes_scan_type(httpx_mock):
 
 
 # ---------------------------------------------------------------------------
-# fetch_secrets — cursor pagination
+# fetch_secrets — v2 Issues API (POST, cursor pagination)
 # ---------------------------------------------------------------------------
 
 def test_fetch_secrets_cursor_pagination(httpx_mock):
-    """Follows cursor chain across two pages."""
+    """Follows cursor chain across two pages via POST."""
     httpx_mock.add_response(url=DEPLOYMENTS_URL, json=DEPLOYMENTS_RESPONSE)
     httpx_mock.add_response(
-        url=f"{SECRETS_URL}?limit=100",
-        json={"findings": [_secret_raw("s1")], "cursor": "cursor-abc"},
+        url=SECRETS_V2_URL, method="POST",
+        json={"issues": [_v2_issue_wrapper(_secret_raw("s1"))], "cursor": "cursor-abc"},
     )
     httpx_mock.add_response(
-        url=f"{SECRETS_URL}?limit=100&cursor=cursor-abc",
-        json={"findings": [_secret_raw("s2")], "cursor": ""},
+        url=SECRETS_V2_URL, method="POST",
+        json={"issues": [_v2_issue_wrapper(_secret_raw("s2"))], "cursor": ""},
     )
 
     findings = make_client().fetch_secrets()
     assert len(findings) == 2
     assert findings[0].id == "s1"
     assert findings[1].id == "s2"
-    assert findings[0].rule_name == "SecretType.s1"
+    assert findings[0].rule_name == "secrets.type.s1"
     assert findings[0].file_path == "src/files1.py"
     assert findings[0].line == 10
     assert findings[0].repo == "repo"
@@ -132,8 +140,8 @@ def test_fetch_secrets_severity_normalization(httpx_mock):
     """SEVERITY_MEDIUM prefix is stripped and uppercased."""
     httpx_mock.add_response(url=DEPLOYMENTS_URL, json=DEPLOYMENTS_RESPONSE)
     httpx_mock.add_response(
-        url=f"{SECRETS_URL}?limit=100",
-        json={"findings": [_secret_raw("s1", severity="SEVERITY_MEDIUM")], "cursor": ""},
+        url=SECRETS_V2_URL, method="POST",
+        json={"issues": [_v2_issue_wrapper(_secret_raw("s1", severity="SEVERITY_MEDIUM"))], "cursor": ""},
     )
 
     findings = make_client().fetch_secrets()
@@ -141,11 +149,11 @@ def test_fetch_secrets_severity_normalization(httpx_mock):
 
 
 def test_fetch_secrets_stops_on_empty_results(httpx_mock):
-    """Stops immediately if the first page returns an empty findings array."""
+    """Stops immediately if the first page returns an empty issues array."""
     httpx_mock.add_response(url=DEPLOYMENTS_URL, json=DEPLOYMENTS_RESPONSE)
     httpx_mock.add_response(
-        url=f"{SECRETS_URL}?limit=100",
-        json={"findings": [], "cursor": "some-cursor"},
+        url=SECRETS_V2_URL, method="POST",
+        json={"issues": [], "cursor": "some-cursor"},
     )
 
     findings = make_client().fetch_secrets()

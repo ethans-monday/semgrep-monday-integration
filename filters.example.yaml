@@ -34,20 +34,30 @@
 #                        or reachability. Results are merged with the primary SCA fetch.)
 #
 #   secrets:
-#     severity         — [SEVERITY_HIGH, SEVERITY_CRITICAL, SEVERITY_MEDIUM, SEVERITY_LOW]
-#                        Note: secrets API uses SEVERITY_ prefix, unlike SAST/SCA.
-#     repo             — [org/repo1, org/repo2]
-#     validation_state — [VALIDATION_STATE_CONFIRMED_VALID, VALIDATION_STATE_CONFIRMED_INVALID,
-#                         VALIDATION_STATE_NO_VALIDATOR, VALIDATION_STATE_VALIDATION_ERROR]
+#     severity           — [SEVERITY_HIGH, SEVERITY_CRITICAL, SEVERITY_MEDIUM, SEVERITY_LOW]
+#                          Note: secrets v2 API uses SEVERITY_ prefix, unlike SAST/SCA.
+#     confidence         — [CONFIDENCE_HIGH, CONFIDENCE_MEDIUM, CONFIDENCE_LOW]
+#     repo               — [org/repo1, org/repo2]
+#     validation_state   — [VALIDATION_STATE_CONFIRMED_VALID, VALIDATION_STATE_CONFIRMED_INVALID,
+#                           VALIDATION_STATE_NO_VALIDATOR, VALIDATION_STATE_VALIDATION_ERROR]
+#     secret_type        — [API Key, Connection URI, ...]  (free-text values from Semgrep)
+#     repo_visibility    — [REPOSITORY_VISIBILITY_PUBLIC, REPOSITORY_VISIBILITY_PRIVATE,
+#                           REPOSITORY_VISIBILITY_UNKNOWN]
+#     status             — [ISSUE_TAB_OPEN | ISSUE_TAB_REVIEWING | ISSUE_TAB_IGNORED |
+#                           ISSUE_TAB_CLOSED | ISSUE_TAB_FIXING | ISSUE_TAB_PROVISIONALLY_IGNORED]
+#                          (single value only — scalar param)
+#     exclude_historical — [true]  (boolean trigger: filters out historical secrets)
 
-# --- Recommended: only open findings (default; pairs with triage-on-sync) ---
+# --- Recommended: only open findings (pairs with --set-triage-reviewing) ---
 # The sync script triages each finding to "reviewing" in Semgrep after creating
-# the monday item. Filtering by status: [open] is already the default. Adding it
-# to the filters file makes it explicit and allows overriding if needed.
+# the monday item. Filtering by open status ensures already-reviewed findings
+# are not re-synced on subsequent runs.
 # sast:
 #   status: [open]
 # sca:
 #   status: [open]
+# secrets:
+#   status: [ISSUE_TAB_OPEN]
 
 # --- Worked example 1: high+critical SAST that AI flagged as true positive ---
 # sast:
@@ -61,9 +71,11 @@
 #   transitivity: [direct]
 #   malicious: [true]
 
-# --- Worked example 3: only confirmed-valid secrets ---
+# --- Worked example 3: only open, confirmed-valid secrets (skip historical) ---
 # secrets:
+#   status: [ISSUE_TAB_OPEN]
 #   validation_state: [VALIDATION_STATE_CONFIRMED_VALID]
+#   exclude_historical: [true]
 
 # Full example (uncomment and edit):
 # sast:
@@ -78,8 +90,10 @@
 #   malicious: [true]
 
 # secrets:
+#   status: [ISSUE_TAB_OPEN]
 #   severity: [SEVERITY_HIGH, SEVERITY_CRITICAL]
 #   validation_state: [VALIDATION_STATE_CONFIRMED_VALID, VALIDATION_STATE_NO_VALIDATOR, VALIDATION_STATE_VALIDATION_ERROR]
+#   exclude_historical: [true]
 
 # Future / not yet supported — will be added in a later iteration:
 #   - negation:   !severity: [low]

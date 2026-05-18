@@ -57,9 +57,20 @@ SCA_FINDING = Finding(
 )
 
 SECRET_FINDING = Finding(
-    id="s-2001", rule_name="generic.aws-key", severity="CRITICAL",
+    id="s-2001", rule_name="secrets.generic.aws-key", severity="CRITICAL",
     file_path=".env", line=3, repo="my-repo", finding_type="Secrets",
-    raw={"validationState": "VALIDATION_STATE_CONFIRMED_VALID", "findingPathUrl": "https://github.com/org/repo/blob/abc/.env#L3"},
+    raw={
+        "triageState": "FINDING_TRIAGE_STATE_UNTRIAGED",
+        "confidence": "CONFIDENCE_HIGH",
+        "lineOfCodeUrl": "https://github.com/org/repo/blob/abc/.env#L3",
+        "message": "AWS key found in source code",
+        "secretsAttributes": {
+            "validationState": "VALIDATION_STATE_CONFIRMED_VALID",
+            "secretType": "AWS Key",
+        },
+        "ruleCweNames": ["CWE-798: Use of Hard-coded Credentials"],
+        "ruleOwaspNames": ["A07:2021 - Identification and Authentication Failures"],
+    },
 )
 
 

@@ -16,7 +16,7 @@ TODAY = str(date.today())
 
 SEMGREP_FINDINGS_URL = "https://semgrep.dev/api/v1/deployments/acme-corp/findings"
 SEMGREP_DEPLOYMENTS_URL = "https://semgrep.dev/api/v1/deployments"
-SEMGREP_SECRETS_URL = "https://semgrep.dev/api/v1/deployments/20169/secrets"
+SEMGREP_SECRETS_V2_URL = "https://semgrep.dev/api/agent/deployments/20169/issues"
 SEMGREP_TRIAGE_URL = "https://semgrep.dev/api/v1/deployments/acme-corp/triage"
 MONDAY_URL = "https://api.monday.com/v2"
 
@@ -78,13 +78,15 @@ def _sca_finding(fid, severity="HIGH"):
     }
 
 
-def _secret_finding(fid, severity="CRITICAL"):
+def _secret_finding(fid, severity="SEVERITY_CRITICAL"):
     return {
-        "id": fid, "type": f"secret.{fid}", "severity": severity,
-        "findingPath": ".env:1",
-        "findingPathUrl": f"https://github.com/org/repo/blob/abc/.env#L1",
+        "id": fid, "rulePath": f"secrets.generic.{fid}", "severity": severity,
+        "confidence": "CONFIDENCE_HIGH",
+        "filePath": ".env", "line": 1,
+        "lineOfCodeUrl": f"https://github.com/org/repo/blob/abc/.env#L1",
         "repository": {"name": "acme"},
-        "validationState": "VALIDATION_STATE_CONFIRMED_VALID",
+        "triageState": "FINDING_TRIAGE_STATE_UNTRIAGED",
+        "secretsAttributes": {"validationState": "VALIDATION_STATE_CONFIRMED_VALID", "secretType": "API Key"},
     }
 
 
@@ -113,9 +115,10 @@ def _add_semgrep_pages(httpx_mock, issue_type, findings):
 
 def _add_secrets(httpx_mock, secrets):
     httpx_mock.add_response(url=SEMGREP_DEPLOYMENTS_URL, json=DEPLOYMENTS_RESP)
+    issues = [{"issue": s, "reviewCount": 0, "allRefs": []} for s in secrets]
     httpx_mock.add_response(
-        url=f"{SEMGREP_SECRETS_URL}?limit=100",
-        json={"findings": secrets, "cursor": ""},
+        url=SEMGREP_SECRETS_V2_URL, method="POST",
+        json={"issues": issues, "cursor": ""},
     )
 
 
@@ -237,12 +240,12 @@ def test_secrets_cursor_exhausted(httpx_mock, env_vars, state_file):
 
     httpx_mock.add_response(url=SEMGREP_DEPLOYMENTS_URL, json=DEPLOYMENTS_RESP)
     httpx_mock.add_response(
-        url=f"{SEMGREP_SECRETS_URL}?limit=100",
-        json={"findings": [_secret_finding("301")], "cursor": "abc"},
+        url=SEMGREP_SECRETS_V2_URL, method="POST",
+        json={"issues": [{"issue": _secret_finding("301"), "reviewCount": 0, "allRefs": []}], "cursor": "abc"},
     )
     httpx_mock.add_response(
-        url=f"{SEMGREP_SECRETS_URL}?limit=100&cursor=abc",
-        json={"findings": [_secret_finding("302")], "cursor": ""},
+        url=SEMGREP_SECRETS_V2_URL, method="POST",
+        json={"issues": [{"issue": _secret_finding("302"), "reviewCount": 0, "allRefs": []}], "cursor": ""},
     )
 
     _add_monday_responses(httpx_mock, n_secrets=2)

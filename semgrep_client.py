@@ -2,13 +2,12 @@
 
 Handles two distinct endpoints with different pagination schemes:
   - /findings  (SAST + SCA)  — offset-based pagination (page / page_size)
-  - /secrets                  — cursor-based pagination (cursor / limit)
+  - /issues v2 (Secrets)     — POST with cursor pagination
 
-The /secrets endpoint has a different response schema from /findings:
-  - top-level key is "findings" (not "secrets")
-  - rule name is in "type" (not "rule_name")
-  - location is in "findingPath" as "file:line" (not a nested "location" object)
-  - code URL is in "findingPathUrl"
+Secrets use the v2 Issues API:
+  - POST https://semgrep.dev/api/agent/deployments/{id}/issues
+  - Response: {"issues": [{"issue": {...}}, ...], "cursor": "..."}
+  - Triage: PATCH https://semgrep.dev/api/agent/deployments/{id}/findings/v2
 """
 
 from dataclasses import dataclass
@@ -18,6 +17,7 @@ import time
 import httpx
 
 SEMGREP_BASE = "https://semgrep.dev/api/v1"
+SEMGREP_V2_BASE = "https://semgrep.dev/api/agent"
 _TIMEOUT = 120
 _MAX_RETRIES = 3
 _RETRY_BACKOFF = 5  # seconds
@@ -82,6 +82,24 @@ class SemgrepClient:
                     continue
                 raise
 
+    def _patch(self, url: str, body: dict) -> dict:
+        for attempt in range(_MAX_RETRIES):
+            try:
+                response = httpx.patch(
+                    url, headers={**self._headers, "Content-Type": "application/json"},
+                    json=body, timeout=_TIMEOUT,
+                )
+                if response.status_code != 200:
+                    raise SemgrepAPIError(
+                        f"HTTP {response.status_code} from {url}: {response.text[:300]}"
+                    )
+                return response.json()
+            except httpx.TimeoutException:
+                if attempt < _MAX_RETRIES - 1:
+                    time.sleep(_RETRY_BACKOFF * (attempt + 1))
+                    continue
+                raise
+
     def _fetch_deployment_id(self) -> str:
         """Discover the numeric deployment ID for the configured slug."""
         url = f"{SEMGREP_BASE}/deployments"
@@ -107,23 +125,18 @@ class SemgrepClient:
         )
 
     @staticmethod
-    def _parse_secret_finding(raw: dict) -> Finding:
-        """Parse a finding from the /secrets endpoint (different schema from /findings)."""
-        finding_path = raw.get("findingPath", "")
-        parts = finding_path.rsplit(":", 1)
-        file_path = parts[0] if parts else ""
-        line = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
-
+    def _parse_secret_issue(raw: dict) -> Finding:
+        """Parse a secret from the v2 Issues API response."""
         raw_sev = (raw.get("severity") or "UNKNOWN").upper()
         if raw_sev.startswith("SEVERITY_"):
             raw_sev = raw_sev[len("SEVERITY_"):]
 
         return Finding(
             id=str(raw["id"]),
-            rule_name=raw.get("type", ""),
+            rule_name=raw.get("rulePath", ""),
             severity=raw_sev,
-            file_path=file_path,
-            line=line,
+            file_path=raw.get("filePath", ""),
+            line=raw.get("line", 0),
             repo=(raw.get("repository") or {}).get("name", ""),
             finding_type="Secrets",
             raw=raw,
@@ -174,43 +187,42 @@ class SemgrepClient:
     def fetch_secrets(
         self,
         max_findings: int = 10_000,
-        extra_params: dict | None = None,
+        filter_params: dict | None = None,
     ) -> list[Finding]:
-        """Fetch Secrets findings using cursor pagination.
-
-        Uses the numeric deployment ID (not the slug), discovered automatically if not provided.
-        The /secrets endpoint returns {"findings": [...], "cursor": "..."} — note the key
-        is "findings", not "secrets", and each item uses a different schema from /findings.
+        """Fetch Secrets issues using the v2 Issues API (POST, cursor pagination).
 
         Args:
             max_findings: Stop after collecting this many findings.
-            extra_params: Additional query params (e.g. filter pushdowns). Pagination
-                          params ``limit`` and ``cursor`` always take precedence.
+            filter_params: Filter dict matching the v2 ``filter`` body field.
+                           Pagination fields (``limit``, ``cursor``) are managed internally.
         """
         if not self._dep_id:
             self._dep_id = self._fetch_deployment_id()
-        url = f"{SEMGREP_BASE}/deployments/{self._dep_id}/secrets"
+        url = f"{SEMGREP_V2_BASE}/deployments/{self._dep_id}/issues"
         results: list[Finding] = []
-        cursor: str | None = None
+        cursor: str = ""
 
         while len(results) < max_findings:
             remaining = max_findings - len(results)
             page_size = min(100, remaining)
-            params: dict = {}
-            if extra_params:
-                for k, v in extra_params.items():
-                    if k not in ("limit", "cursor"):
-                        params[k] = v
-            params["limit"] = page_size
+            body: dict = {
+                "deploymentId": self._dep_id,
+                "issueType": "ISSUE_TYPE_SECRETS",
+                "limit": page_size,
+            }
+            if filter_params:
+                body["filter"] = filter_params
             if cursor:
-                params["cursor"] = cursor
+                body["cursor"] = cursor
 
-            data = self._get(url, params)
-            batch = data.get("findings", [])
-            if not batch:
+            data = self._post(url, body)
+            issues = data.get("issues", [])
+            if not issues:
                 break
 
-            results.extend(self._parse_secret_finding(f) for f in batch)
+            for item in issues:
+                issue = item.get("issue") or item
+                results.append(self._parse_secret_issue(issue))
 
             cursor = data.get("cursor", "")
             if not cursor:
@@ -228,11 +240,19 @@ class SemgrepClient:
         """Triage one or more findings in Semgrep (set state + note).
 
         Args:
-            finding_ids: Semgrep finding IDs (strings — cast to int for the API).
+            finding_ids: Semgrep finding IDs (strings).
             triage_state: New triage state (e.g. ``"reviewing"``).
             note: Note text (e.g. ``"Created monday item: https://..."``).
             issue_type: ``"sast"``, ``"sca"``, or ``"secrets"``.
         """
+        if issue_type == "secrets":
+            self._triage_secrets_v2(finding_ids, triage_state, note)
+        else:
+            self._triage_v1(finding_ids, triage_state, note, issue_type)
+
+    def _triage_v1(
+        self, finding_ids: list[str], triage_state: str, note: str, issue_type: str,
+    ) -> None:
         url = f"{SEMGREP_BASE}/deployments/{self._slug}/triage"
         batch_size = 3000
         for i in range(0, len(finding_ids), batch_size):
@@ -244,3 +264,24 @@ class SemgrepClient:
                 "new_note": note,
             }
             self._post(url, body)
+
+    def _triage_secrets_v2(
+        self, finding_ids: list[str], triage_state: str, note: str,
+    ) -> None:
+        if not self._dep_id:
+            self._dep_id = self._fetch_deployment_id()
+        url = f"{SEMGREP_V2_BASE}/deployments/{self._dep_id}/findings/v2"
+        state_map = {
+            "reviewing": "FINDING_TRIAGE_STATE_REVIEWING",
+            "ignored": "FINDING_TRIAGE_STATE_IGNORED",
+            "reopened": "FINDING_TRIAGE_STATE_REOPENED",
+            "fixing": "FINDING_TRIAGE_STATE_FIXING",
+        }
+        v2_state = state_map.get(triage_state, f"FINDING_TRIAGE_STATE_{triage_state.upper()}")
+        body: dict = {
+            "deploymentId": self._dep_id,
+            "issueType": "ISSUE_TYPE_SECRETS",
+            "filter": {"ids": finding_ids},
+            "params": {"triageState": v2_state, "note": note},
+        }
+        self._patch(url, body)

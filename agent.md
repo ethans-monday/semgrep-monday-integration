@@ -15,16 +15,16 @@ MONDAY_BOARD_ID_SCA
 MONDAY_BOARD_ID_SECRETS
 ```
 
-The numeric deployment ID (required for the `/secrets` endpoint) is auto-discovered at runtime from the slug — no manual configuration needed.
+The numeric deployment ID (required for the Secrets v2 API endpoints) is auto-discovered at runtime from the slug — no manual configuration needed.
 
 ## Behavior
 
-1. Fetches all open findings from Semgrep (SAST, SCA, Secrets). SAST and SCA use `dedup=true` to deduplicate across branches.
+1. Fetches all open findings from Semgrep (SAST, SCA, Secrets). SAST and SCA use the v1 `/findings` endpoint with `dedup=true`. Secrets use the v2 Issues API (`POST /api/agent/deployments/{id}/issues` with `issueType: ISSUE_TYPE_SECRETS`).
 2. Loads `state.json` for deduplication. Findings already synced are skipped.
 3. Groups new SAST and SCA findings to reduce board noise (see **Finding grouping** below). Secrets are not grouped.
 4. For each group (or individual Secrets finding), creates a monday.com item on the appropriate board with all available metadata and a deep-link to the finding in the Semgrep Cloud UI.
 5. Immediately after each successful item creation, posts a rich HTML update to the item's Updates feed. Grouped items list each member finding's details and Semgrep URL.
-6. If `--set-triage-reviewing` is passed: triages the finding(s) in Semgrep — sets triage state to `"reviewing"` and adds a note with the monday.com item URL (e.g. `Created monday item: https://acme.monday.com/boards/123/pulses/456`). Triage failure is non-fatal. Skipped by default.
+6. If `--set-triage-reviewing` is passed: triages the finding(s) in Semgrep — sets triage state to `"reviewing"` and adds a note with the monday.com item URL (e.g. `Created monday item: https://acme.monday.com/boards/123/pulses/456`). SAST/SCA use the v1 triage endpoint; Secrets use the v2 bulk-update endpoint (`PATCH /api/agent/deployments/{id}/findings/v2` with `FINDING_TRIAGE_STATE_REVIEWING`). Triage failure is non-fatal. Skipped by default.
 7. Saves updated state. All member finding IDs in a group are recorded, pointing to the same monday.com item ID.
 
 ## Error handling
@@ -93,9 +93,9 @@ python sync.py --set-triage-reviewing       # triage synced findings to 'reviewi
 
 Set `SEMGREP_FILTERS_FILE` to a YAML path, or use `--filters PATH`. If `filters.yaml` exists in the repo root it is applied automatically. `--no-filters` disables all filtering for that run.
 
-Filters are pushed to the Semgrep API as query params (server-side). Exception: `ai_verdict: [not_analyzed]` (and any list that includes it) is applied client-side after fetching, since the Semgrep API has no equivalent param for findings where the AI verdict field is absent. Filters gate new fetches only — `state.json` is never modified based on filter config.
+Filters are pushed server-side. SAST/SCA use query params on the v1 `/findings` endpoint. Secrets use the v2 `filter` body on the POST Issues endpoint — all secrets filtering is server-side (no client-side post-filters needed). Exception for SAST only: `ai_verdict: [not_analyzed]` (and any list that includes it) is applied client-side after fetching, since the v1 API has no equivalent param. Filters gate new fetches only — `state.json` is never modified based on filter config.
 
-The `status` filter key is supported for SAST and SCA (not yet for Secrets). `status: [open]` is already the hardcoded default; adding it to `filters.yaml` makes it explicit and allows overriding. Combined with triage-on-sync (which sets findings to "reviewing"), this provides server-side dedup for SAST/SCA.
+The `status` filter key is supported for all three types. For SAST/SCA it maps to the v1 `status` query param (values: `open`, `fixed`, etc.). For Secrets it maps to the v2 `tab` filter (values: `ISSUE_TAB_OPEN`, `ISSUE_TAB_REVIEWING`, etc. — single value only). Combined with triage-on-sync (which sets findings to "reviewing"), this provides server-side dedup for all three types.
 
 ## Lambda usage
 

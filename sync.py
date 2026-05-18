@@ -23,7 +23,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from filters import filter_findings, has_malicious_filter, load_filters, to_malicious_query_params, to_query_params
+from filters import filter_findings, has_malicious_filter, load_filters, to_malicious_query_params, to_query_params, to_secrets_filter_body
 from monday_client import MondayAPIError, MondayClient
 from semgrep_client import Finding, SemgrepAPIError, SemgrepClient
 
@@ -402,15 +402,20 @@ def sca_finding_to_item(finding: Finding, col_map: dict[str, str]) -> tuple[str,
 
 def secrets_finding_to_item(finding: Finding, col_map: dict[str, str]) -> tuple[str, dict]:
     raw = finding.raw
+    secrets_attrs = raw.get("secretsAttributes") or {}
 
-    item_name = f"{finding.rule_name} - {finding.repo} - {finding.file_path}:{finding.line}"
+    short_rule = finding.rule_name.split(".")[-1] if finding.rule_name else ""
+    item_name = f"{short_rule} - {finding.repo} - {finding.file_path}:{finding.line}"
     cv: dict = {}
 
     _set_col(cv, col_map, "Finding ID", finding.id)
     _set_status_col(cv, col_map, "Severity", _SEVERITY_LABELS.get(finding.severity, finding.severity.capitalize()))
     _set_col(cv, col_map, "Rule", finding.rule_name)
-    _set_status_col(cv, col_map, "Triage State", _snake_to_title(_safe_get(raw, "triageState")))
-    raw_val_state = _safe_get(raw, "validationState")
+    triage_raw = _safe_get(raw, "triageState")
+    if triage_raw.startswith("FINDING_TRIAGE_STATE_"):
+        triage_raw = triage_raw[len("FINDING_TRIAGE_STATE_"):]
+    _set_status_col(cv, col_map, "Triage State", triage_raw.replace("_", " ").title())
+    raw_val_state = secrets_attrs.get("validationState", "")
     _set_status_col(cv, col_map, "Validation State", _VALIDATION_STATE_LABELS.get(raw_val_state, raw_val_state))
     _set_col(cv, col_map, "File", f"{finding.file_path}:{finding.line}")
     _set_col(cv, col_map, "Repo", finding.repo)
@@ -418,9 +423,11 @@ def secrets_finding_to_item(finding: Finding, col_map: dict[str, str]) -> tuple[
     if raw_conf.startswith("CONFIDENCE_"):
         raw_conf = raw_conf[len("CONFIDENCE_"):]
     _set_status_col(cv, col_map, "Confidence", raw_conf.capitalize())
-    _set_link_col(cv, col_map, "Code URL", _safe_get(raw, "findingPathUrl"))
-    _set_col(cv, col_map, "External Ticket", _safe_get(raw, "externalTicket"))
-    # Semgrep URL is injected by run() which has access to the deployment slug
+    _set_dropdown_col(cv, col_map, "Secret Type", [secrets_attrs.get("secretType")] if secrets_attrs.get("secretType") else None)
+    _set_link_col(cv, col_map, "Code URL", _safe_get(raw, "lineOfCodeUrl"))
+    _set_col(cv, col_map, "Message", _truncate(_safe_get(raw, "message")))
+    _set_col(cv, col_map, "CWE", _join_list(raw.get("ruleCweNames")))
+    _set_dropdown_col(cv, col_map, "OWASP", raw.get("ruleOwaspNames"))
 
     return item_name, cv
 
@@ -537,6 +544,7 @@ def format_update_body_sca(finding: Finding) -> str:
 def format_update_body_secrets(finding: Finding) -> str:
     """HTML update body for a Secrets finding — posted to the monday.com Updates feed."""
     raw = finding.raw
+    secrets_attrs = raw.get("secretsAttributes") or {}
 
     # --- Header ---
     sections = [
@@ -545,16 +553,22 @@ def format_update_body_secrets(finding: Finding) -> str:
     ]
 
     # --- Details ---
-    raw_vs = _safe_get(raw, "validationState")
+    raw_vs = secrets_attrs.get("validationState", "")
     raw_conf = (_safe_get(raw, "confidence") or "").upper()
     if raw_conf.startswith("CONFIDENCE_"):
         raw_conf = raw_conf[len("CONFIDENCE_"):]
+    triage_raw = _safe_get(raw, "triageState")
+    if triage_raw.startswith("FINDING_TRIAGE_STATE_"):
+        triage_raw = triage_raw[len("FINDING_TRIAGE_STATE_"):]
     fields = [
         _fmt_field("Validation State", _VALIDATION_STATE_LABELS.get(raw_vs, raw_vs)),
         _fmt_field("Confidence", raw_conf.capitalize()),
-        _fmt_field("Triage State", _snake_to_title(_safe_get(raw, "triageState"))),
-        _fmt_field("Code URL", _safe_get(raw, "findingPathUrl")),
-        _fmt_field("External Ticket", _safe_get(raw, "externalTicket")),
+        _fmt_field("Secret Type", secrets_attrs.get("secretType", "")),
+        _fmt_field("Triage State", triage_raw.replace("_", " ").title()),
+        _fmt_field("CWE", _join_list(raw.get("ruleCweNames"))),
+        _fmt_field("OWASP", _join_list(raw.get("ruleOwaspNames"))),
+        _fmt_field("Message", _truncate(_safe_get(raw, "message"))),
+        _fmt_field("Code URL", _safe_get(raw, "lineOfCodeUrl")),
     ]
     detail_block = "<br>".join(f for f in fields if f)
     if detail_block:
@@ -759,14 +773,14 @@ def run(
             seen_ids = {f.id for f in sca_raw}
             sca_raw.extend(f for f in malicious_raw if f.id not in seen_ids)
             print(f"  SCA malicious second-pass: {len(malicious_raw)} fetched, {len(sca_raw) - len(seen_ids)} new")
-        secrets_raw = semgrep.fetch_secrets(extra_params=to_query_params("secrets", filters), **fetch_kwargs) if "Secrets" in active_types else []
+        secrets_raw = semgrep.fetch_secrets(filter_params=to_secrets_filter_body(filters), **fetch_kwargs) if "Secrets" in active_types else []
     except SemgrepAPIError as exc:
         print(f"Semgrep API error: {exc}")
         sys.exit(1)
 
     sast = filter_findings(sast_raw, "sast", filters)
     sca = filter_findings(sca_raw, "sca", filters)
-    secrets = filter_findings(secrets_raw, "secrets", filters)
+    secrets = secrets_raw  # v2 API handles all filtering server-side
 
     findings_by_type = {"SAST": sast, "SCA": sca, "Secrets": secrets}
     if "SAST" in active_types:

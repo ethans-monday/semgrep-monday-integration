@@ -4,9 +4,9 @@ Syncs security findings from the Semgrep Cloud Platform to monday.com boards. Fi
 
 ```
 Semgrep Cloud API  -->  sync.py  -->  monday.com GraphQL API
-  /findings (SAST)                      SAST Findings board   (+ Updates feed)
-  /findings (SCA)                       SCA Findings board    (+ Updates feed)
-  /secrets                              Secrets Findings board (+ Updates feed)
+  v1 /findings (SAST)                   SAST Findings board   (+ Updates feed)
+  v1 /findings (SCA)                    SCA Findings board    (+ Updates feed)
+  v2 /issues (Secrets)                  Secrets Findings board (+ Updates feed)
 ```
 
 ## What Gets Synced
@@ -15,7 +15,7 @@ Semgrep Cloud API  -->  sync.py  -->  monday.com GraphQL API
 
 **SCA board (23 columns)** -- CVE, reachability status, EPSS score/percentile, vulnerable package + version, ecosystem, transitivity, fix recommendations, malicious package flag, Semgrep deep-link.
 
-**Secrets board (11 columns)** -- Validation state (confirmed valid/invalid/unvalidated), confidence, standard finding metadata, Semgrep deep-link.
+**Secrets board (13 columns)** -- Validation state (confirmed valid/invalid/unvalidated), confidence, secret type, triage state, CWE, OWASP, message, standard finding metadata, Semgrep deep-link.
 
 All boards include: Finding ID, severity, confidence, rule name, triage state, file location, repo, code URL, and Semgrep URL.
 
@@ -26,7 +26,7 @@ After creating each board item, the script posts an HTML update to the item's Up
 - Header with severity, rule, file:line, and repo
 - **SAST:** AI-generated finding description (instance-specific attack narrative), CWE/OWASP, component risk, triage state, and a Remediation section with numbered fix steps plus the suggested patch code
 - **SCA:** CVE, reachability, EPSS score, vulnerable package details, fix recommendation, lockfile URL
-- **Secrets:** validation state, code URL, external ticket
+- **Secrets:** validation state, secret type, confidence, triage state, CWE/OWASP, message, code URL
 
 ## Prerequisites
 
@@ -113,7 +113,7 @@ With the `--set-triage-reviewing` flag, the script triages each synced finding i
 python sync.py --set-triage-reviewing
 ```
 
-This provides server-side deduplication for SAST and SCA: filtering by `status: [open]` in `filters.yaml` ensures already-synced findings are excluded on subsequent runs. For Secrets, the triage is applied but the secrets endpoint does not yet support status filtering, so `state.json` handles dedup.
+This provides server-side deduplication for all three types: filtering by `status: [open]` (SAST/SCA) or `status: [ISSUE_TAB_OPEN]` (Secrets) in `filters.yaml` ensures already-synced findings are excluded on subsequent runs.
 
 The monday.com account slug (subdomain) is auto-discovered via the `account { slug }` GraphQL query. If this fails, set `MONDAY_ACCOUNT_SLUG` in `.env`.
 
@@ -129,7 +129,7 @@ Use `--limit N` to cap the number of findings fetched per type. Useful for initi
 
 ### Filtering
 
-The sync supports a YAML config file that gates which findings are fetched from Semgrep. Filters are pushed to the Semgrep API as query params (server-side) — only matching findings are downloaded, saving API budget and bandwidth.
+The sync supports a YAML config file that gates which findings are fetched from Semgrep. Filters are pushed server-side — SAST/SCA as query params on the v1 API, Secrets as a `filter` body on the v2 Issues API. Only matching findings are downloaded, saving API budget and bandwidth.
 
 **File location and precedence:**
 1. `--filters PATH` CLI flag
@@ -159,6 +159,8 @@ sca:
   reachability: [reachable]
 
 secrets:
+  status: [ISSUE_TAB_OPEN]
+  severity: [SEVERITY_HIGH, SEVERITY_CRITICAL]
   validation_state: [VALIDATION_STATE_CONFIRMED_VALID]
 ```
 
@@ -169,19 +171,24 @@ secrets:
 | Key | SAST | SCA | Secrets |
 |---|---|---|---|
 | `severity` | ✓ (low/medium/high/critical) | ✓ | ✓ (SEVERITY_HIGH etc.) |
-| `confidence` | ✓ scalar | ✓ scalar | |
+| `confidence` | ✓ scalar | ✓ scalar | ✓ (CONFIDENCE_HIGH etc.) |
 | `repo` | ✓ | ✓ | ✓ |
 | `rule` | ✓ | | |
 | `ai_verdict` | ✓ (true_positive, false_positive, not_analyzed¹) | | |
-| `status` | ✓ (open/fixed/ignored/reviewing/fixing/provisionally_ignored) | ✓ | |
+| `status` | ✓ (open/fixed/ignored/reviewing/fixing/provisionally_ignored) | ✓ | ✓ scalar (ISSUE_TAB_OPEN/REVIEWING/IGNORED/CLOSED/FIXING) |
 | `reachability` | | ✓ | |
 | `transitivity` | | ✓ | |
 | `malicious` | | ✓ ([true])² | |
 | `validation_state` | | | ✓ |
+| `secret_type` | | | ✓ (free-text values, e.g. "API Key") |
+| `repo_visibility` | | | ✓ (REPOSITORY_VISIBILITY_PUBLIC etc.) |
+| `exclude_historical` | | | ✓ ([true])³ |
 
-¹ `not_analyzed` (and any list that includes it) is applied client-side after fetching — the Semgrep API has no equivalent param for findings where the AI verdict field is absent.
+¹ `not_analyzed` (and any list that includes it) is applied client-side after fetching — the Semgrep v1 API has no equivalent param for findings where the AI verdict field is absent.
 
 ² `malicious: [true]` triggers a second SCA query with only `is_malicious=true` — no other SCA filters (severity, reachability, etc.) are applied to it. Results are merged with the primary SCA fetch and deduplicated.
+
+³ `exclude_historical: [true]` filters out historical secrets issues (those no longer present in code). Boolean trigger — only `[true]` is accepted.
 
 Filters gate new fetches only — existing items in `state.json` are never modified or removed.
 
@@ -268,6 +275,6 @@ No documented rate limits for the findings REST API. The script uses reasonable 
 
 **Update post failed: ...** -- the monday.com item was created but the Updates-feed body couldn't be posted (usually a transient network reset). The finding is still recorded in state; only the rich update body is missing. Re-running will not re-attempt the failed update.
 
-**Empty secrets results** -- confirm that Secrets scanning is enabled in your Semgrep org. The numeric deployment ID is auto-discovered from your slug; no manual configuration is needed.
+**Empty secrets results** -- confirm that Secrets scanning is enabled in your Semgrep org. The numeric deployment ID is auto-discovered from your slug; no manual configuration is needed. If using `status: [ISSUE_TAB_OPEN]`, verify that untriaged secrets exist in the Semgrep UI.
 
 **Column not found errors** -- run `setup_boards.py` to create boards with the correct column layout. Don't manually add, rename, or delete columns on the boards the script writes to.

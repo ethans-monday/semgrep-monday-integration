@@ -78,12 +78,15 @@ BOARD_COLUMNS: dict[str, list[str]] = {
         "Rule",
         "Triage State",
         "Validation State",
+        "Secret Type",
         "File",
         "Repo",
         "Confidence",
+        "Message",
+        "CWE",
+        "OWASP",
         "Code URL",
         "Semgrep URL",
-        "External Ticket",
     ],
 }
 
@@ -106,6 +109,7 @@ COLUMN_TYPES: dict[str, str] = {
     "OWASP":            "dropdown",
     "Semgrep URL":      "link",
     "Code URL":         "link",
+    "Secret Type":      "dropdown",
 }
 
 

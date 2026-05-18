@@ -35,12 +35,15 @@ ALLOWED_FILTERS: dict[str, dict[str, str]] = {
         "malicious": "_malicious",          # Boolean trigger: [true] → second fetch with is_malicious=true
     },
     "secrets": {
-        # Verified against /deployments/<id>/secrets API docs (2025-05).
-        # Note: severity values use the SEVERITY_ prefix (e.g. SEVERITY_HIGH, SEVERITY_CRITICAL).
-        # Note: repo param is singular 'repo' here, unlike 'repos' for the /findings endpoint.
-        "severity": "severity",               # Array: SEVERITY_HIGH, SEVERITY_CRITICAL, etc.
-        "repo": "repo",                       # Array of strings
-        "validation_state": "validationState", # Array: VALIDATION_STATE_CONFIRMED_VALID, etc.
+        # v2 Issues API (POST /api/agent/deployments/{id}/issues) filter body fields.
+        "severity": "severities",              # Array: SEVERITY_HIGH, SEVERITY_CRITICAL, etc.
+        "confidence": "confidences",           # Array: CONFIDENCE_HIGH, CONFIDENCE_MEDIUM, CONFIDENCE_LOW
+        "repo": "repositoryNames",             # Array of strings: org/repo
+        "validation_state": "validationStates", # Array: VALIDATION_STATE_CONFIRMED_VALID, etc.
+        "secret_type": "secretTypes",          # Array of strings
+        "repo_visibility": "repoVisibilities", # Array: REPOSITORY_VISIBILITY_PUBLIC, etc.
+        "exclude_historical": "_exclude_historical",  # Boolean trigger (handled specially)
+        "status": "tab",                        # String: ISSUE_TAB_OPEN, ISSUE_TAB_REVIEWING, etc.
     },
 }
 
@@ -49,6 +52,9 @@ ALLOWED_FILTERS: dict[str, dict[str, str]] = {
 # Note: autotriage_verdict is NOT here — ai_verdict has special handling because
 # not_analyzed has no API equivalent and is applied client-side by filter_findings().
 SCALAR_PARAMS: frozenset[str] = frozenset({"confidence"})
+
+# Secrets v2 API params that accept a single string value.
+_SECRETS_SCALAR_PARAMS: frozenset[str] = frozenset({"tab"})
 
 
 def load_filters(path: Path | None) -> dict[str, dict[str, list[str]]]:
@@ -93,11 +99,22 @@ def load_filters(path: Path | None) -> dict[str, dict[str, list[str]]]:
                     f"Filter '{board_type}.{key}' maps to a scalar Semgrep API param "
                     f"and must contain exactly 1 value, got {len(values)}."
                 )
+            if api_param in _SECRETS_SCALAR_PARAMS and len(values) != 1:
+                raise ValueError(
+                    f"Filter '{board_type}.{key}' maps to a scalar API param "
+                    f"and must contain exactly 1 value, got {len(values)}."
+                )
             if key == "malicious":
                 val = str(values[0]).lower()
                 if val != "true" or len(values) != 1:
                     raise ValueError(
                         f"Filter '{board_type}.malicious' must be [true], got {values}."
+                    )
+            if key == "exclude_historical":
+                val = str(values[0]).lower()
+                if val != "true" or len(values) != 1:
+                    raise ValueError(
+                        f"Filter '{board_type}.exclude_historical' must be [true], got {values}."
                     )
             result[board_type][key] = [str(v) for v in values]
 
@@ -105,7 +122,7 @@ def load_filters(path: Path | None) -> dict[str, dict[str, list[str]]]:
 
 
 def to_query_params(board_type: str, filters: dict) -> dict:
-    """Convert a board's filter block to Semgrep API query params.
+    """Convert a board's filter block to Semgrep API query params (SAST/SCA only).
 
     Returns {} if no filters are configured for this board type.
     Array params are passed as lists (httpx serializes as repeated keys).
@@ -114,6 +131,8 @@ def to_query_params(board_type: str, filters: dict) -> dict:
     ai_verdict special case: not_analyzed has no Semgrep API equivalent.
     Only pushes autotriage_verdict when there is exactly one value and it is not not_analyzed.
     Otherwise the filter is skipped here and applied client-side by filter_findings().
+
+    For secrets, use ``to_secrets_filter_body()`` instead.
     """
     block = filters.get(board_type, {})
     if not block:
@@ -135,6 +154,30 @@ def to_query_params(board_type: str, filters: dict) -> dict:
             continue
 
         result[api_param] = values[0] if api_param in SCALAR_PARAMS else values
+    return result
+
+
+def to_secrets_filter_body(filters: dict) -> dict:
+    """Convert secrets filter block to a v2 Issues API ``filter`` dict.
+
+    Returns {} if no secrets filters are configured.
+    """
+    block = filters.get("secrets", {})
+    if not block:
+        return {}
+
+    param_map = ALLOWED_FILTERS["secrets"]
+    result: dict = {}
+    for key, values in block.items():
+        api_param = param_map[key]
+
+        if key == "exclude_historical":
+            val = str(values[0]).lower()
+            if val == "true":
+                result["excludeHistorical"] = True
+            continue
+
+        result[api_param] = values[0] if api_param in _SECRETS_SCALAR_PARAMS else values
     return result
 
 

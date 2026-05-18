@@ -4,7 +4,7 @@ import re
 import pytest
 from pathlib import Path
 
-from filters import load_filters, to_query_params, to_malicious_query_params, has_malicious_filter, filter_findings, ALLOWED_FILTERS
+from filters import load_filters, to_query_params, to_secrets_filter_body, to_malicious_query_params, has_malicious_filter, filter_findings, ALLOWED_FILTERS
 from semgrep_client import SemgrepClient, Finding
 
 TOKEN = "test-token"
@@ -13,7 +13,7 @@ DEP_ID = "20169"
 
 DEPLOYMENTS_URL = "https://semgrep.dev/api/v1/deployments"
 FINDINGS_URL = f"https://semgrep.dev/api/v1/deployments/{SLUG}/findings"
-SECRETS_URL = f"https://semgrep.dev/api/v1/deployments/{DEP_ID}/secrets"
+SECRETS_V2_URL = f"https://semgrep.dev/api/agent/deployments/{DEP_ID}/issues"
 
 DEPLOYMENTS_RESPONSE = {"deployments": [{"id": int(DEP_ID), "slug": SLUG}]}
 
@@ -37,12 +37,20 @@ def _finding_raw(fid="1"):
 def _secret_raw(fid="s1"):
     return {
         "id": fid,
-        "type": f"SecretType.{fid}",
-        "severity": "HIGH",
-        "findingPath": f"src/file{fid}.py:10",
-        "findingPathUrl": f"https://github.com/org/repo/blob/abc/src/file{fid}.py#L10",
+        "rulePath": f"secrets.type.{fid}",
+        "severity": "SEVERITY_HIGH",
+        "confidence": "CONFIDENCE_HIGH",
+        "filePath": f"src/file{fid}.py",
+        "line": 10,
+        "lineOfCodeUrl": f"https://github.com/org/repo/blob/abc/src/file{fid}.py#L10",
         "repository": {"name": "repo"},
+        "triageState": "FINDING_TRIAGE_STATE_UNTRIAGED",
+        "secretsAttributes": {"validationState": "VALIDATION_STATE_NO_VALIDATOR", "secretType": "API Key"},
     }
+
+
+def _v2_issue_wrapper(raw: dict) -> dict:
+    return {"issue": raw, "reviewCount": 0, "allRefs": []}
 
 
 # ---------------------------------------------------------------------------
@@ -61,6 +69,7 @@ sca:
 secrets:
   severity: [SEVERITY_HIGH, SEVERITY_CRITICAL]
   validation_state: [VALIDATION_STATE_CONFIRMED_VALID]
+  status: [ISSUE_TAB_OPEN]
 """
     path = _write_yaml(tmp_path, yaml_content)
     result = load_filters(path)
@@ -72,6 +81,7 @@ secrets:
     assert result["sca"]["reachability"] == ["reachable"]
     assert result["secrets"]["severity"] == ["SEVERITY_HIGH", "SEVERITY_CRITICAL"]
     assert result["secrets"]["validation_state"] == ["VALIDATION_STATE_CONFIRMED_VALID"]
+    assert result["secrets"]["status"] == ["ISSUE_TAB_OPEN"]
 
 
 def test_load_filters_partial_block(tmp_path):
@@ -181,12 +191,23 @@ def test_to_query_params_sca():
     assert params["transitivities"] == ["direct"]
 
 
-def test_to_query_params_secrets():
+def test_to_secrets_filter_body():
     filters = {
         "secrets": {"validation_state": ["VALIDATION_STATE_CONFIRMED_VALID"]}
     }
-    params = to_query_params("secrets", filters)
-    assert params["validationState"] == ["VALIDATION_STATE_CONFIRMED_VALID"]
+    body = to_secrets_filter_body(filters)
+    assert body["validationStates"] == ["VALIDATION_STATE_CONFIRMED_VALID"]
+
+
+def test_to_secrets_filter_body_status():
+    filters = {"secrets": {"status": ["ISSUE_TAB_OPEN"]}}
+    body = to_secrets_filter_body(filters)
+    assert body["tab"] == "ISSUE_TAB_OPEN"
+
+
+def test_to_secrets_filter_body_empty():
+    assert to_secrets_filter_body({}) == {}
+    assert to_secrets_filter_body({"sast": {"severity": ["HIGH"]}}) == {}
 
 
 def test_to_query_params_no_block():
@@ -279,35 +300,46 @@ def test_fetch_findings_pagination_not_overridden(httpx_mock):
 
 
 # ---------------------------------------------------------------------------
-# SemgrepClient.fetch_secrets — extra_params passthrough
+# SemgrepClient.fetch_secrets — filter_params passthrough (v2 POST body)
 # ---------------------------------------------------------------------------
 
-def test_fetch_secrets_extra_params_sent(httpx_mock):
-    """extra_params are forwarded to the secrets endpoint."""
-    secrets_re = re.compile(rf"^{re.escape(SECRETS_URL)}")
+def test_fetch_secrets_filter_params_sent(httpx_mock):
+    """filter_params are included in the POST body to the v2 issues endpoint."""
     httpx_mock.add_response(url=DEPLOYMENTS_URL, json=DEPLOYMENTS_RESPONSE)
-    httpx_mock.add_response(url=secrets_re, json={"findings": [_secret_raw("s1")], "cursor": ""})
+    httpx_mock.add_response(
+        url=SECRETS_V2_URL, method="POST",
+        json={"issues": [_v2_issue_wrapper(_secret_raw("s1"))], "cursor": ""},
+    )
 
     client = SemgrepClient(token=TOKEN, deployment_slug=SLUG)
-    findings = client.fetch_secrets(extra_params={"validationState": ["VALIDATION_STATE_CONFIRMED_VALID"]})
+    findings = client.fetch_secrets(filter_params={"validationStates": ["VALIDATION_STATE_CONFIRMED_VALID"]})
 
     assert len(findings) == 1
+    import json as json_mod
     req = httpx_mock.get_requests()[1]
-    assert req.url.params.get_list("validationState") == ["VALIDATION_STATE_CONFIRMED_VALID"]
+    body = json_mod.loads(req.content)
+    assert body["filter"]["validationStates"] == ["VALIDATION_STATE_CONFIRMED_VALID"]
+    assert body["issueType"] == "ISSUE_TYPE_SECRETS"
 
 
-def test_fetch_secrets_pagination_not_overridden(httpx_mock):
-    """limit/cursor in extra_params do not override pagination."""
-    secrets_re = re.compile(rf"^{re.escape(SECRETS_URL)}")
+def test_fetch_secrets_pagination_managed_internally(httpx_mock):
+    """limit and cursor in the POST body are managed by the client."""
     httpx_mock.add_response(url=DEPLOYMENTS_URL, json=DEPLOYMENTS_RESPONSE)
-    httpx_mock.add_response(url=secrets_re, json={"findings": [_secret_raw("s1")], "cursor": ""})
+    httpx_mock.add_response(
+        url=SECRETS_V2_URL, method="POST",
+        json={"issues": [_v2_issue_wrapper(_secret_raw("s1"))], "cursor": ""},
+    )
 
     client = SemgrepClient(token=TOKEN, deployment_slug=SLUG)
-    client.fetch_secrets(max_findings=5, extra_params={"limit": 9999, "cursor": "bad-cursor"})
+    client.fetch_secrets(max_findings=5, filter_params={"tab": "ISSUE_TAB_OPEN", "severities": ["SEVERITY_HIGH"]})
 
+    import json as json_mod
     req = httpx_mock.get_requests()[1]
-    assert req.url.params["limit"] == "5"
-    assert "cursor" not in req.url.params
+    body = json_mod.loads(req.content)
+    assert body["limit"] == 5
+    assert "cursor" not in body
+    assert body["filter"]["tab"] == "ISSUE_TAB_OPEN"
+    assert body["filter"]["severities"] == ["SEVERITY_HIGH"]
 
 
 # ---------------------------------------------------------------------------
@@ -379,9 +411,17 @@ def test_to_malicious_query_params_standalone():
     assert params == {"is_malicious": "true"}
 
 
-def test_status_not_allowed_for_secrets(tmp_path):
-    path = _write_yaml(tmp_path, "secrets:\n  status: [open]\n")
-    with pytest.raises(ValueError, match="Unknown filter key 'status'"):
+def test_secrets_status_accepted(tmp_path):
+    """secrets supports 'status' (maps to v2 tab param)."""
+    path = _write_yaml(tmp_path, "secrets:\n  status: [ISSUE_TAB_OPEN]\n")
+    result = load_filters(path)
+    assert result["secrets"]["status"] == ["ISSUE_TAB_OPEN"]
+
+
+def test_secrets_status_scalar(tmp_path):
+    """secrets status maps to tab (scalar) — only one value allowed."""
+    path = _write_yaml(tmp_path, "secrets:\n  status: [ISSUE_TAB_OPEN, ISSUE_TAB_REVIEWING]\n")
+    with pytest.raises(ValueError, match="scalar"):
         load_filters(path)
 
 
