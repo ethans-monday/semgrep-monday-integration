@@ -13,9 +13,14 @@ The /secrets endpoint has a different response schema from /findings:
 
 from dataclasses import dataclass
 
+import time
+
 import httpx
 
 SEMGREP_BASE = "https://semgrep.dev/api/v1"
+_TIMEOUT = 120
+_MAX_RETRIES = 3
+_RETRY_BACKOFF = 5  # seconds
 
 
 class SemgrepAPIError(Exception):
@@ -45,23 +50,37 @@ class SemgrepClient:
     # ------------------------------------------------------------------
 
     def _get(self, url: str, params: dict | None = None) -> dict:
-        response = httpx.get(url, headers=self._headers, params=params, timeout=30)
-        if response.status_code != 200:
-            raise SemgrepAPIError(
-                f"HTTP {response.status_code} from {url}: {response.text[:300]}"
-            )
-        return response.json()
+        for attempt in range(_MAX_RETRIES):
+            try:
+                response = httpx.get(url, headers=self._headers, params=params, timeout=_TIMEOUT)
+                if response.status_code != 200:
+                    raise SemgrepAPIError(
+                        f"HTTP {response.status_code} from {url}: {response.text[:300]}"
+                    )
+                return response.json()
+            except httpx.TimeoutException:
+                if attempt < _MAX_RETRIES - 1:
+                    time.sleep(_RETRY_BACKOFF * (attempt + 1))
+                    continue
+                raise
 
     def _post(self, url: str, body: dict) -> dict:
-        response = httpx.post(
-            url, headers={**self._headers, "Content-Type": "application/json"},
-            json=body, timeout=30,
-        )
-        if response.status_code != 200:
-            raise SemgrepAPIError(
-                f"HTTP {response.status_code} from {url}: {response.text[:300]}"
-            )
-        return response.json()
+        for attempt in range(_MAX_RETRIES):
+            try:
+                response = httpx.post(
+                    url, headers={**self._headers, "Content-Type": "application/json"},
+                    json=body, timeout=_TIMEOUT,
+                )
+                if response.status_code != 200:
+                    raise SemgrepAPIError(
+                        f"HTTP {response.status_code} from {url}: {response.text[:300]}"
+                    )
+                return response.json()
+            except httpx.TimeoutException:
+                if attempt < _MAX_RETRIES - 1:
+                    time.sleep(_RETRY_BACKOFF * (attempt + 1))
+                    continue
+                raise
 
     def _fetch_deployment_id(self) -> str:
         """Discover the numeric deployment ID for the configured slug."""
