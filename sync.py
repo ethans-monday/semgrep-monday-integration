@@ -253,6 +253,8 @@ def load_state(path: Path) -> dict:
                 v4.setdefault(board, {})[mid] = entry.get("finding_ids", [])
         state["monday_items_created"] = v4
     state["version"] = STATE_VERSION
+    for key in _empty_items():
+        state["monday_items_created"].setdefault(key, {})
     return state
 
 
