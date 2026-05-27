@@ -78,6 +78,7 @@ This creates three boards (Semgrep SAST Findings, Semgrep SCA Findings, Semgrep 
 python sync.py                            # sync all open findings
 python sync.py --limit 50                 # sync up to 50 per type (for testing)
 python sync.py --set-triage-reviewing     # also triage findings in Semgrep
+python sync.py --dry-run                  # fetch and print finding IDs, no side effects
 ```
 
 ## Configuration

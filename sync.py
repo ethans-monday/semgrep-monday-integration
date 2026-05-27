@@ -8,6 +8,7 @@ Usage:
     python sync.py --filters my.yaml              # apply custom filters file
     python sync.py --no-filters                   # skip filtering even if filters.yaml exists
     python sync.py --set-triage-reviewing         # triage synced findings to 'reviewing' in Semgrep
+    python sync.py --dry-run                      # fetch and print finding IDs without side effects
 
 State is persisted in state.json. Re-running is safe — findings already synced
 are skipped (deduplication by Semgrep finding ID).
@@ -811,6 +812,7 @@ def run(
     filters_path: Path | None = DEFAULT_FILTERS_FILE,
     types: set[str] | None = None,
     set_triage_reviewing: bool = False,
+    dry_run: bool = False,
 ) -> None:
     # types=None means all; validate against known board keys
     active_types = types if types is not None else set(BOARD_CONFIG)
@@ -879,6 +881,19 @@ def run(
         print(f"  {_filter_log('secrets', len(secrets_raw), len(secrets), filters)}")
     total = sum(len(v) for v in findings_by_type.values())
     print(f"  Total: {total}")
+
+    if dry_run:
+        print("\n[DRY RUN] Finding IDs by type:")
+        for board_type in ("SAST", "SCA", "Secrets"):
+            type_findings = findings_by_type.get(board_type, [])
+            if not type_findings:
+                continue
+            ids = [f.id for f in type_findings]
+            print(f"  {board_type} ({len(ids)}):")
+            for fid in ids:
+                print(f"    {fid}")
+        print("\nNo state changes, no monday items created, no Semgrep triage updates.")
+        return
 
     # --- Fetch column maps (one per board, only if that board has new findings) ---
     col_maps: dict[str, dict] = {}
@@ -966,6 +981,8 @@ if __name__ == "__main__":
                         help="Comma-separated list of types to sync: sast,sca,secrets (default: all)")
     parser.add_argument("--set-triage-reviewing", action="store_true",
                         help="Triage synced findings to 'reviewing' in Semgrep with a note linking to the monday item")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Fetch findings and print IDs without creating monday items or updating state")
     args = parser.parse_args()
 
     if args.type:
@@ -986,4 +1003,4 @@ if __name__ == "__main__":
         resolved_filters_path = Path(env_path) if env_path else DEFAULT_FILTERS_FILE
 
     run(limit=args.limit, filters_path=resolved_filters_path, types=resolved_types,
-        set_triage_reviewing=args.set_triage_reviewing)
+        set_triage_reviewing=args.set_triage_reviewing, dry_run=args.dry_run)

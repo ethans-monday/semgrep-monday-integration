@@ -43,6 +43,7 @@ class MondayClient:
             body["variables"] = variables
 
         for attempt in range(MAX_RETRIES):
+            print(f"  [monday] POST {MONDAY_URL} variables={body.get('variables')}")
             response = httpx.post(MONDAY_URL, headers=self._headers, json=body, timeout=30)
 
             if response.status_code == 429:

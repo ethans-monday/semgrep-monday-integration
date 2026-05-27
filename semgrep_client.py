@@ -52,6 +52,7 @@ class SemgrepClient:
     def _get(self, url: str, params: dict | None = None) -> dict:
         for attempt in range(_MAX_RETRIES):
             try:
+                print(f"  [semgrep] GET {url}" + (f"?{'&'.join(f'{k}={v}' for k, v in params.items())}" if params else ""))
                 response = httpx.get(url, headers=self._headers, params=params, timeout=_TIMEOUT)
                 if response.status_code != 200:
                     raise SemgrepAPIError(
@@ -67,6 +68,7 @@ class SemgrepClient:
     def _post(self, url: str, body: dict) -> dict:
         for attempt in range(_MAX_RETRIES):
             try:
+                print(f"  [semgrep] POST {url} body={body}")
                 response = httpx.post(
                     url, headers={**self._headers, "Content-Type": "application/json"},
                     json=body, timeout=_TIMEOUT,
@@ -85,6 +87,7 @@ class SemgrepClient:
     def _patch(self, url: str, body: dict) -> dict:
         for attempt in range(_MAX_RETRIES):
             try:
+                print(f"  [semgrep] PATCH {url} body={body}")
                 response = httpx.patch(
                     url, headers={**self._headers, "Content-Type": "application/json"},
                     json=body, timeout=_TIMEOUT,
