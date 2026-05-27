@@ -87,6 +87,7 @@ python sync.py --limit 100                  # cap at 100 findings per type
 python sync.py --filters my.yaml            # use a specific filters file
 python sync.py --no-filters                 # bypass filtering even if filters.yaml exists
 python sync.py --set-triage-reviewing       # triage synced findings to 'reviewing' in Semgrep
+python sync.py --dry-run                    # fetch and print finding IDs, no side effects
 ```
 
 ## Filtering
