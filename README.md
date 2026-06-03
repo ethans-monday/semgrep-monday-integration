@@ -11,13 +11,13 @@ Semgrep Cloud API  -->  sync.py  -->  monday.com GraphQL API
 
 ## What Gets Synced
 
-**SAST board (23 columns)** -- AI triage verdict, CWE, OWASP, vulnerability classes, AI guidance, autofix availability, component risk, rule explanation, Semgrep deep-link, and more.
+**SAST board (24 columns)** -- AI triage verdict, CWE, OWASP, vulnerability classes, AI guidance, autofix availability, component risk, rule explanation, project tags, Semgrep deep-link, and more.
 
-**SCA board (23 columns)** -- CVE, reachability status, EPSS score/percentile, vulnerable package + version, ecosystem, transitivity, fix recommendations, malicious package flag, Semgrep deep-link.
+**SCA board (24 columns)** -- CVE, reachability status, EPSS score/percentile, vulnerable package + version, ecosystem, transitivity, fix recommendations, malicious package flag, project tags, Semgrep deep-link.
 
-**Secrets board (13 columns)** -- Validation state (confirmed valid/invalid/unvalidated), confidence, secret type, triage state, CWE, OWASP, message, standard finding metadata, Semgrep deep-link.
+**Secrets board (15 columns)** -- Validation state (confirmed valid/invalid/unvalidated), confidence, secret type, triage state, CWE, OWASP, message, project tags, standard finding metadata, Semgrep deep-link.
 
-All boards include: Finding ID, severity, confidence, rule name, triage state, file location, repo, code URL, and Semgrep URL.
+All boards include: Finding ID, severity, confidence, rule name, triage state, file location, repo, code URL, Semgrep URL, and project tags (auto-populated from Semgrep project metadata).
 
 ### Updates feed
 
@@ -262,7 +262,7 @@ The script handles monday.com rate limiting automatically by respecting the `Ret
 | Pro | 10,000 |
 | Enterprise | 25,000 |
 
-**API calls per new finding:** each finding creates **two** monday.com calls (one `create_item`, one `create_update`) plus **one** Semgrep API call (`triage`). A full sync of 1,000 new findings costs roughly **2,004 monday.com calls** (3 column-map queries + 1 account-slug query + 1,000 × 2) and **1,000 Semgrep triage calls**. Plan your tier and cron cadence accordingly — idempotent re-runs only spend calls on *new* findings.
+**API calls per new finding:** each finding creates **two** monday.com calls (one `create_item`, one `create_update`) plus **one** Semgrep API call (`triage`). Each unique repo also costs **one** Semgrep API call to fetch project tags (cached per run — subsequent findings from the same repo reuse the cached result). A full sync of 1,000 new findings costs roughly **2,004 monday.com calls** (3 column-map queries + 1 account-slug query + 1,000 × 2) and **1,000 Semgrep triage calls** plus one project-tags call per unique repo. Plan your tier and cron cadence accordingly — idempotent re-runs only spend calls on *new* findings.
 
 ### Semgrep API
 

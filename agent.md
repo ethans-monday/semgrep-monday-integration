@@ -48,7 +48,7 @@ All member finding IDs are tracked in `state.json` — re-runs skip the entire g
 
 ## API budget
 
-Each group (or individual Secrets finding) consumes **2** monday.com API calls (one `create_item` plus one `create_update`) and **1** Semgrep API call (`triage`). Plus one `get_column_map` query per board per run (cached after first use) and one `get_account_slug` query per run.
+Each group (or individual Secrets finding) consumes **2** monday.com API calls (one `create_item` plus one `create_update`) and **1** Semgrep API call (`triage`). Each unique repo encountered also costs **1** Semgrep API call to fetch project tags (cached for the duration of the run — subsequent findings from the same repo reuse the cached result). Plus one `get_column_map` query per board per run (cached after first use) and one `get_account_slug` query per run.
 
 Grouping reduces API spend — e.g. 10 SCA findings across 3 packages becomes 3 items (6 monday calls + 3 triage calls) instead of 10 items (20 monday calls + 10 triage calls). Idempotent re-runs only spend calls on findings that haven't been synced before.
 

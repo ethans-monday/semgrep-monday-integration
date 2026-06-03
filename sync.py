@@ -813,6 +813,7 @@ def run(
     types: set[str] | None = None,
     set_triage_reviewing: bool = False,
     dry_run: bool = False,
+    no_dedup: bool = False,
 ) -> None:
     # types=None means all; validate against known board keys
     active_types = types if types is not None else set(BOARD_CONFIG)
@@ -855,11 +856,12 @@ def run(
     # --- Fetch findings ---
     print("Fetching Semgrep findings…")
     fetch_kwargs = {} if limit is None else {"max_findings": limit}
+    dedup_params = {} if no_dedup else {"dedup": "true"}
     try:
-        sast_raw = semgrep.fetch_findings("sast", extra_params={**to_query_params("sast", filters), "dedup": "true"}, **fetch_kwargs) if "SAST" in active_types else []
-        sca_raw = semgrep.fetch_findings("sca", extra_params={**to_query_params("sca", filters), "dedup": "true"}, **fetch_kwargs) if "SCA" in active_types else []
+        sast_raw = semgrep.fetch_findings("sast", extra_params={**to_query_params("sast", filters), **dedup_params}, **fetch_kwargs) if "SAST" in active_types else []
+        sca_raw = semgrep.fetch_findings("sca", extra_params={**to_query_params("sca", filters), **dedup_params}, **fetch_kwargs) if "SCA" in active_types else []
         if "SCA" in active_types and has_malicious_filter(filters):
-            malicious_raw = semgrep.fetch_findings("sca", extra_params={**to_malicious_query_params(), "dedup": "true"}, **fetch_kwargs)
+            malicious_raw = semgrep.fetch_findings("sca", extra_params={**to_malicious_query_params(), **dedup_params}, **fetch_kwargs)
             seen_ids = {f.id for f in sca_raw}
             sca_raw.extend(f for f in malicious_raw if f.id not in seen_ids)
             print(f"  SCA malicious second-pass: {len(malicious_raw)} fetched, {len(sca_raw) - len(seen_ids)} new")
@@ -897,6 +899,15 @@ def run(
 
     # --- Fetch column maps (one per board, only if that board has new findings) ---
     col_maps: dict[str, dict] = {}
+
+    # --- Project tags cache (repo → list of tags) ---
+    project_tags_cache: dict[str, list[str]] = {}
+
+    def _get_project_tags(repo: str) -> list[str]:
+        if repo not in project_tags_cache:
+            project = semgrep.fetch_project(repo)
+            project_tags_cache[repo] = project.get("tags", []) if project else []
+        return project_tags_cache[repo]
 
     # --- Route and create ---
     created = 0
@@ -937,6 +948,7 @@ def run(
             item_name, col_vals = mapper(finding, col_map)
             _MERGED_FIELDS_FN[board_type](col_vals, col_map, group)
             _set_link_col(col_vals, col_map, "Semgrep URL", _semgrep_finding_url(slug, finding))
+            _set_dropdown_col(col_vals, col_map, "Project Tags", _get_project_tags(finding.repo))
             try:
                 monday_id, _ = board["client"].create_item(item_name, col_vals)
                 state["monday_items_created"][board_type][monday_id] = [
@@ -975,12 +987,14 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Sync Semgrep findings to monday.com")
     _VALID_TYPES = {"sast": "SAST", "sca": "SCA", "secrets": "Secrets"}
     parser.add_argument("--limit", type=int, default=None, metavar="N", help="Max findings per type")
-    parser.add_argument("--filters", default=None, metavar="PATH", help="Path to filters YAML file")
+    parser.add_argument("--filters", default=None, metavar="PATH", help="Path to filters YAML file (default: filters.yaml if it exists)")
     parser.add_argument("--no-filters", action="store_true", help="Bypass filtering even if filters.yaml exists")
     parser.add_argument("--type", default=None, metavar="TYPES",
                         help="Comma-separated list of types to sync: sast,sca,secrets (default: all)")
     parser.add_argument("--set-triage-reviewing", action="store_true",
                         help="Triage synced findings to 'reviewing' in Semgrep with a note linking to the monday item")
+    parser.add_argument("--no-dedup", action="store_true",
+                        help="Disable Semgrep server-side deduplication (omit dedup=true from API calls)")
     parser.add_argument("--dry-run", action="store_true",
                         help="Fetch findings and print IDs without creating monday items or updating state")
     args = parser.parse_args()
@@ -1003,4 +1017,5 @@ if __name__ == "__main__":
         resolved_filters_path = Path(env_path) if env_path else DEFAULT_FILTERS_FILE
 
     run(limit=args.limit, filters_path=resolved_filters_path, types=resolved_types,
-        set_triage_reviewing=args.set_triage_reviewing, dry_run=args.dry_run)
+        set_triage_reviewing=args.set_triage_reviewing, dry_run=args.dry_run,
+        no_dedup=args.no_dedup)

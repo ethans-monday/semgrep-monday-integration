@@ -18,6 +18,7 @@ SEMGREP_FINDINGS_URL = "https://semgrep.dev/api/v1/deployments/acme-corp/finding
 SEMGREP_DEPLOYMENTS_URL = "https://semgrep.dev/api/v1/deployments"
 SEMGREP_SECRETS_V2_URL = "https://semgrep.dev/api/agent/deployments/20169/issues"
 SEMGREP_TRIAGE_URL = "https://semgrep.dev/api/v1/deployments/acme-corp/triage"
+SEMGREP_PROJECTS_URL = "https://semgrep.dev/api/v1/deployments/acme-corp/projects"
 MONDAY_URL = "https://api.monday.com/v2"
 
 ACCOUNT_SLUG_RESP = {"data": {"account": {"slug": "acme-test"}}}
@@ -106,6 +107,11 @@ def state_file(tmp_path) -> Path:
     return tmp_path / "state.json"
 
 
+def _add_project_tags(httpx_mock):
+    url_re = re.compile(rf"^{re.escape(SEMGREP_PROJECTS_URL)}/")
+    httpx_mock.add_response(url=url_re, json={"project": {"name": "acme", "tags": ["test-tag"]}})
+
+
 def _add_semgrep_pages(httpx_mock, issue_type, findings):
     url_re = re.compile(rf"^{re.escape(SEMGREP_FINDINGS_URL)}\?.*issue_type={issue_type}")
     httpx_mock.add_response(url=url_re, json={"findings": findings})
@@ -130,6 +136,8 @@ def _add_triage_responses(httpx_mock, n):
 
 def _add_monday_responses(httpx_mock, n_sast=0, n_sca=0, n_secrets=0, with_triage=False):
     """Register monday responses in actual call order: col query → creates per board."""
+    if n_sast + n_sca + n_secrets > 0:
+        _add_project_tags(httpx_mock)
     counter = [0]
 
     def next_id():
@@ -215,6 +223,7 @@ def test_partial_failure_recovery(httpx_mock, env_vars, state_file):
     _add_semgrep_pages(httpx_mock, "sast", findings)
     _add_semgrep_pages(httpx_mock, "sca", [])
     _add_secrets(httpx_mock, [])
+    _add_project_tags(httpx_mock)
 
     monday = MagicMock()
     monday.get_column_map.return_value = {"Finding ID": "c0", "Severity": "c1", "Rule": "c2", "File": "c3", "Repo": "c4"}
