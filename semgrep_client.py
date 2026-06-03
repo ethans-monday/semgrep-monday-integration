@@ -149,6 +149,27 @@ class SemgrepClient:
     # Public API
     # ------------------------------------------------------------------
 
+    def fetch_projects(self) -> list[dict]:
+        """Fetch all projects for this deployment.
+
+        Returns list of project dicts with keys: name, tags, id, url, etc.
+        """
+        url = f"{SEMGREP_BASE}/deployments/{self._slug}/projects"
+        data = self._get(url)
+        return data.get("projects", [])
+
+    def fetch_project(self, project_name: str) -> dict | None:
+        """Fetch a single project by name.
+
+        Returns project dict or None if not found.
+        """
+        url = f"{SEMGREP_BASE}/deployments/{self._slug}/projects/{project_name}"
+        try:
+            data = self._get(url)
+            return data.get("project")
+        except SemgrepAPIError:
+            return None
+
     def fetch_findings(
         self,
         issue_type: str,

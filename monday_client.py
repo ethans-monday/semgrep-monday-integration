@@ -43,7 +43,7 @@ class MondayClient:
             body["variables"] = variables
 
         for attempt in range(MAX_RETRIES):
-            print(f"  [monday] POST {MONDAY_URL} variables={body.get('variables')}")
+            print(f"  [monday] POST {MONDAY_URL}")
             response = httpx.post(MONDAY_URL, headers=self._headers, json=body, timeout=30)
 
             if response.status_code == 429:
@@ -132,6 +132,88 @@ class MondayClient:
         """
         data = self._post(mutation, {"itemId": item_id, "body": body})
         return data["data"]["create_update"]["id"]
+
+    def get_board_items(self, column_ids: list[str]) -> list[dict]:
+        """Fetch all items from the board with specified column values.
+
+        Returns list of dicts: {"id": str, "column_values": [{"id": str, "text": str}]}
+        Paginates automatically using cursor.
+        """
+        query = """
+        query ($boardId: [ID!], $columnIds: [String!], $cursor: String) {
+          boards(ids: $boardId) {
+            items_page(limit: 500, cursor: $cursor) {
+              cursor
+              items {
+                id
+                column_values(ids: $columnIds) {
+                  id
+                  text
+                }
+              }
+            }
+          }
+        }
+        """
+        items: list[dict] = []
+        cursor = None
+        while True:
+            variables: dict = {"boardId": [str(self.board_id)], "columnIds": column_ids}
+            if cursor:
+                variables["cursor"] = cursor
+            data = self._post(query, variables)
+            page = data["data"]["boards"][0]["items_page"]
+            items.extend(page["items"])
+            cursor = page.get("cursor")
+            if not cursor:
+                break
+        return items
+
+    def get_items_by_ids(self, item_ids: list[str], column_ids: list[str]) -> list[dict]:
+        """Fetch specific items by ID with specified column values."""
+        query = """
+        query ($itemIds: [ID!], $columnIds: [String!]) {
+          items(ids: $itemIds) {
+            id
+            column_values(ids: $columnIds) {
+              id
+              text
+            }
+          }
+        }
+        """
+        data = self._post(query, {"itemIds": item_ids, "columnIds": column_ids})
+        return data["data"]["items"]
+
+    def change_column_values(self, item_id: str, column_values: dict) -> str:
+        """Update column values on an existing item.
+
+        Args:
+            item_id: The monday.com item ID.
+            column_values: Dict of {column_id: value}.
+
+        Returns:
+            The item ID.
+        """
+        mutation = """
+        mutation ($boardId: ID!, $itemId: ID!, $colVals: JSON!) {
+          change_multiple_column_values(
+            board_id: $boardId,
+            item_id: $itemId,
+            column_values: $colVals,
+            create_labels_if_missing: true
+          ) {
+            id
+          }
+        }
+        """
+        variables = {
+            "boardId": str(self.board_id),
+            "itemId": item_id,
+            "colVals": json.dumps(column_values),
+        }
+        data = self._post(mutation, variables)
+        return data["data"]["change_multiple_column_values"]["id"]
 
     def create_item(self, name: str, column_values: dict) -> tuple[str, int]:
         """Create a board item.
