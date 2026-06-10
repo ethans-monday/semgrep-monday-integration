@@ -15,7 +15,7 @@ Semgrep Cloud API  -->  sync.py  -->  monday.com GraphQL API
 
 **SCA board (24 columns)** -- CVE, reachability status, EPSS score/percentile, vulnerable package + version, ecosystem, transitivity, fix recommendations, malicious package flag, project tags, Semgrep deep-link.
 
-**Secrets board (15 columns)** -- Validation state (confirmed valid/invalid/unvalidated), confidence, secret type, triage state, CWE, OWASP, message, project tags, standard finding metadata, Semgrep deep-link.
+**Secrets board (15 columns)** -- Validation state (confirmed valid/invalid/unvalidated), confidence, secret type, triage state, CWE, OWASP, message, project tags, standard finding metadata, Semgrep deep-link. Includes both open/reviewing secrets **and** fixed secrets that were never reviewed (see below).
 
 All boards include: Finding ID, severity, confidence, rule name, triage state, file location, repo, code URL, Semgrep URL, and project tags (auto-populated from Semgrep project metadata).
 
@@ -277,5 +277,15 @@ No documented rate limits for the findings REST API. The script uses reasonable 
 **Update post failed: ...** -- the monday.com item was created but the Updates-feed body couldn't be posted (usually a transient network reset). The finding is still recorded in state; only the rich update body is missing. Re-running will not re-attempt the failed update.
 
 **Empty secrets results** -- confirm that Secrets scanning is enabled in your Semgrep org. The numeric deployment ID is auto-discovered from your slug; no manual configuration is needed. If using `status: [ISSUE_TAB_OPEN]`, verify that untriaged secrets exist in the Semgrep UI.
+
+### Fixed secrets (never-reviewed)
+
+After the normal open secrets fetch, the script performs a second Secrets fetch with `aggregateIssueStates: [AGGREGATE_ISSUE_STATE_FIXED]`. Fixed findings are included only if their Semgrep `note` field does **not** contain `monday.com` — meaning they were never previously reviewed via this sync. Fixed findings that already have a monday item URL in their note (written by `--set-triage-reviewing`) are silently skipped.
+
+This catches secrets that were committed and immediately rotated/fixed before the sync ran, which would otherwise never be reviewed.
+
+Results are merged with the open secrets fetch and deduplicated by finding ID. No extra configuration is needed — this second pass always runs when the Secrets board is active. The fixed fetch is not subject to `--limit` so a cap on open findings never causes unreviewed fixed findings to be missed; it pages through all fixed secrets regardless.
+
+Because the Semgrep triage API silently ignores writes to FIXED findings (returns 200 but applies nothing), a separate `fixed_state.json` file is written alongside `state.json` to track which fixed-secret IDs have already been synced. A fixed finding is skipped if its ID is in `fixed_state.json` or if its `note` already contains `monday.com`.
 
 **Column not found errors** -- run `setup_boards.py` to create boards with the correct column layout. Don't manually add, rename, or delete columns on the boards the script writes to.

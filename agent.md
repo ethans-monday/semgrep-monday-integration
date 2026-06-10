@@ -2,6 +2,8 @@
 
 This document describes how `sync.py` behaves when run autonomously (cron, Lambda, CI pipeline).
 
+> **For AI assistants:** whenever you make a feature addition or change to this project, update all three documentation files before considering the task done: `README.md`, `agent.md`, and `CLAUDE.md`.
+
 ## Expected environment variables
 
 All 6 variables must be set. The script exits with code 1 and a clear error message if any are missing.
@@ -19,7 +21,7 @@ The numeric deployment ID (required for the Secrets v2 API endpoints) is auto-di
 
 ## Behavior
 
-1. Fetches all open findings from Semgrep (SAST, SCA, Secrets). SAST and SCA use the v1 `/findings` endpoint with `dedup=true`. Secrets use the v2 Issues API (`POST /api/agent/deployments/{id}/issues` with `issueType: ISSUE_TYPE_SECRETS`).
+1. Fetches all open findings from Semgrep (SAST, SCA, Secrets). SAST and SCA use the v1 `/findings` endpoint with `dedup=true`. Secrets use the v2 Issues API (`POST /api/agent/deployments/{id}/issues` with `issueType: ISSUE_TYPE_SECRETS`). After the open secrets fetch, a second POST is made with `aggregateIssueStates: [AGGREGATE_ISSUE_STATE_FIXED]` to capture fixed secrets that were never reviewed — fixed findings whose `note` field contains `monday.com` are skipped (already reviewed). Results are merged and deduplicated by finding ID. The fixed fetch is not subject to `--limit`; it always pages through all fixed secrets so that a limit on open findings cannot cause unreviewed fixed findings to be missed. Because the Semgrep triage API silently ignores note and state changes on FIXED findings (returns 200 but applies nothing), a separate `fixed_state.json` file is used for dedup. Fixed findings are skipped if their ID is in `fixed_state.json` OR if their `note` contains `monday.com` (previously reviewed via the normal open flow). On successful item creation, the finding ID is added to `fixed_state.json` and saved at the end of the run.
 2. Loads `state.json` for deduplication. Findings already synced are skipped.
 3. Groups new SAST and SCA findings to reduce board noise (see **Finding grouping** below). Secrets are not grouped.
 4. For each group (or individual Secrets finding), creates a monday.com item on the appropriate board with all available metadata and a deep-link to the finding in the Semgrep Cloud UI.
