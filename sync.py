@@ -29,6 +29,7 @@ from monday_client import MondayAPIError, MondayClient
 from semgrep_client import Finding, SemgrepAPIError, SemgrepClient
 
 DEFAULT_STATE_FILE = Path(__file__).parent / "state.json"
+DEFAULT_FIXED_SYNCED_FILE = Path(__file__).parent / "fixed_state.json"
 DEFAULT_FILTERS_FILE = Path(__file__).parent / "filters.yaml"
 STATE_VERSION = 4
 
@@ -297,6 +298,16 @@ def load_state(path: Path) -> dict:
     for key in _empty_items():
         state["monday_items_created"].setdefault(key, {})
     return state
+
+
+def load_fixed_synced(path: Path) -> set[str]:
+    if not path.exists():
+        return set()
+    return set(json.loads(path.read_text()).get("SECRETS", []))
+
+
+def save_fixed_synced(ids: set[str], path: Path) -> None:
+    path.write_text(json.dumps({"version": 1, "SECRETS": sorted(ids)}, indent=2))
 
 
 def synced_finding_ids(state: dict, board_type: str) -> set[str]:
@@ -819,6 +830,8 @@ def run(
     active_types = types if types is not None else set(BOARD_CONFIG)
     cfg = load_config()
     state = load_state(state_path)
+    fixed_synced_path = state_path.parent / "fixed_state.json"
+    fixed_synced_ids: set[str] = load_fixed_synced(fixed_synced_path)
 
     today = str(date.today())
     state.setdefault("daily", {})
@@ -866,6 +879,14 @@ def run(
             sca_raw.extend(f for f in malicious_raw if f.id not in seen_ids)
             print(f"  SCA malicious second-pass: {len(malicious_raw)} fetched, {len(sca_raw) - len(seen_ids)} new")
         secrets_raw = semgrep.fetch_secrets(filter_params=to_secrets_filter_body(filters), **fetch_kwargs) if "Secrets" in active_types else []
+        if "Secrets" in active_types:
+            fixed_filter = {k: v for k, v in to_secrets_filter_body(filters).items() if k != "tab"}
+            fixed_filter["aggregateIssueStates"] = ["AGGREGATE_ISSUE_STATE_FIXED"]
+            fixed_raw = semgrep.fetch_secrets(filter_params=fixed_filter, **{k: v for k, v in fetch_kwargs.items() if k != "max_findings"})
+            seen_ids = {f.id for f in secrets_raw}
+            new_fixed = [f for f in fixed_raw if f.id not in seen_ids and "monday.com" not in (f.raw.get("note") or "") and f.id not in fixed_synced_ids]
+            secrets_raw.extend(new_fixed)
+            print(f"  Secrets fixed second-pass: {len(fixed_raw)} fetched, {len(new_fixed)} eligible (no monday note)")
     except SemgrepAPIError as exc:
         print(f"Semgrep API error: {exc}")
         sys.exit(1)
@@ -954,6 +975,10 @@ def run(
                 state["monday_items_created"][board_type][monday_id] = [
                     f.id for f in group.members
                 ]
+                if board_type == "Secrets":
+                    for f in group.members:
+                        if f.raw.get("aggregateState") == "AGGREGATE_ISSUE_STATE_FIXED":
+                            fixed_synced_ids.add(f.id)
                 state["daily"][today] += 1
                 created += 1
                 member_ids = ", ".join(f.id for f in group.members)
@@ -980,6 +1005,7 @@ def run(
                 print(f"  [{board_type}] Failed for {member_ids}: {exc}")
 
     save_state(state, state_path)
+    save_fixed_synced(fixed_synced_ids, fixed_synced_path)
     print(f"\nDone: {created} items created, {total_new_findings} new findings processed.")
 
 
