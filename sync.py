@@ -886,7 +886,9 @@ def run(
             seen_ids = {f.id for f in secrets_raw}
             new_fixed = [f for f in fixed_raw if f.id not in seen_ids and "monday.com" not in (f.raw.get("note") or "") and f.id not in fixed_synced_ids]
             secrets_raw.extend(new_fixed)
-            print(f"  Secrets fixed second-pass: {len(fixed_raw)} fetched, {len(new_fixed)} eligible (no monday note)")
+            skipped_note = sum(1 for f in fixed_raw if "monday.com" in (f.raw.get("note") or ""))
+            skipped_state = sum(1 for f in fixed_raw if f.id in fixed_synced_ids and "monday.com" not in (f.raw.get("note") or ""))
+            print(f"  Secrets fixed second-pass: {len(fixed_raw)} fetched, {skipped_note} skipped (monday note), {skipped_state} skipped (fixed_state.json), {len(new_fixed)} new")
     except SemgrepAPIError as exc:
         print(f"Semgrep API error: {exc}")
         sys.exit(1)
