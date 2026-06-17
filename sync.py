@@ -138,7 +138,7 @@ def _finding_score(finding: Finding, board_type: str) -> tuple:
 
 def _sca_group_key(finding: Finding) -> tuple:
     dep = finding.raw.get("found_dependency") or {}
-    return (finding.repo, dep.get("package", ""), dep.get("version", ""))
+    return (finding.repo, dep.get("package", ""), finding.file_path)
 
 
 def _sast_group_key(finding: Finding) -> tuple:

@@ -42,7 +42,7 @@ The numeric deployment ID (required for the Secrets v2 API endpoints) is auto-di
 
 SAST and SCA findings are grouped before item creation to reduce board noise:
 
-- **SCA:** Grouped by `{repo, package, version}`. CVE column contains all CVEs (comma-separated). Representative (used for item name, severity, links) is chosen by highest severity → reachable → highest confidence.
+- **SCA:** Grouped by `{repo, package, file}`. CVE column contains all CVEs (comma-separated). Representative (used for item name, severity, links) is chosen by highest severity → reachable → highest confidence.
 - **SAST:** Grouped by `{repo, file, end location}`. Rule names, CWEs, OWASP, and vulnerability classes are merged across members. Representative chosen by highest severity → AI true positive → highest confidence.
 - **Secrets:** Not grouped.
 
