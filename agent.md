@@ -22,12 +22,13 @@ The numeric deployment ID (required for the Secrets v2 API endpoints) is auto-di
 ## Behavior
 
 1. Fetches all open findings from Semgrep (SAST, SCA, Secrets). SAST and SCA use the v1 `/findings` endpoint with `dedup=true`. Secrets use the v2 Issues API (`POST /api/agent/deployments/{id}/issues` with `issueType: ISSUE_TYPE_SECRETS`). After the open secrets fetch, a second POST is made with `aggregateIssueStates: [AGGREGATE_ISSUE_STATE_FIXED]` to capture fixed secrets that were never reviewed — fixed findings whose `note` field contains `monday.com` are skipped (already reviewed). Results are merged and deduplicated by finding ID. The fixed fetch is not subject to `--limit`; it always pages through all fixed secrets so that a limit on open findings cannot cause unreviewed fixed findings to be missed. Because the Semgrep triage API silently ignores note and state changes on FIXED findings (returns 200 but applies nothing), a separate `fixed_state.json` file is used for dedup. Fixed findings are skipped if their ID is in `fixed_state.json` OR if their `note` contains `monday.com` (previously reviewed via the normal open flow). On successful item creation, the finding ID is added to `fixed_state.json` and saved at the end of the run.
-2. Loads `state.json` for deduplication. Findings already synced are skipped.
-3. Groups new SAST and SCA findings to reduce board noise (see **Finding grouping** below). Secrets are not grouped.
-4. For each group (or individual Secrets finding), creates a monday.com item on the appropriate board with all available metadata and a deep-link to the finding in the Semgrep Cloud UI.
-5. Immediately after each successful item creation, posts a rich HTML update to the item's Updates feed. Grouped items list each member finding's details and Semgrep URL.
-6. If `--set-triage-reviewing` is passed: triages the finding(s) in Semgrep — sets triage state to `"reviewing"` and adds a note with the monday.com item URL (e.g. `Created monday item: https://acme.monday.com/boards/123/pulses/456`). SAST/SCA use the v1 triage endpoint; Secrets use the v2 bulk-update endpoint (`PATCH /api/agent/deployments/{id}/findings/v2` with `FINDING_TRIAGE_STATE_REVIEWING`). Triage failure is non-fatal. Skipped by default.
-7. Saves updated state. All member finding IDs in a group are recorded, pointing to the same monday.com item ID.
+2. Drops findings from repos listed under `ignore_repos` in `filters.yaml` across all types.
+3. Loads `state.json` for deduplication. Findings already synced are skipped.
+4. Groups new SAST and SCA findings to reduce board noise (see **Finding grouping** below). Secrets are not grouped.
+5. For each group (or individual Secrets finding), creates a monday.com item on the appropriate board with all available metadata and a deep-link to the finding in the Semgrep Cloud UI.
+6. Immediately after each successful item creation, posts a rich HTML update to the item's Updates feed. Grouped items list each member finding's details and Semgrep URL.
+7. If `--set-triage-reviewing` is passed: triages the finding(s) in Semgrep — sets triage state to `"reviewing"` and adds a note with the monday.com item URL (e.g. `Created monday item: https://acme.monday.com/boards/123/pulses/456`). SAST/SCA use the v1 triage endpoint; Secrets use the v2 bulk-update endpoint (`PATCH /api/agent/deployments/{id}/findings/v2` with `FINDING_TRIAGE_STATE_REVIEWING`). Triage failure is non-fatal. Skipped by default.
+8. Saves updated state. All member finding IDs in a group are recorded, pointing to the same monday.com item ID.
 
 ## Error handling
 

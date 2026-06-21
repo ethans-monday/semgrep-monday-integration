@@ -24,7 +24,7 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from filters import filter_findings, has_malicious_filter, load_filters, to_malicious_query_params, to_query_params, to_secrets_filter_body
+from filters import filter_findings, get_ignored_repos, has_malicious_filter, load_filters, to_malicious_query_params, to_query_params, to_secrets_filter_body
 from monday_client import MondayAPIError, MondayClient
 from semgrep_client import Finding, SemgrepAPIError, SemgrepClient
 
@@ -893,9 +893,10 @@ def run(
         print(f"Semgrep API error: {exc}")
         sys.exit(1)
 
-    sast = filter_findings(sast_raw, "sast", filters)
-    sca = filter_findings(sca_raw, "sca", filters)
-    secrets = secrets_raw  # v2 API handles all filtering server-side
+    ignored_repos = get_ignored_repos(filters)
+    sast = [f for f in filter_findings(sast_raw, "sast", filters) if f.repo not in ignored_repos]
+    sca = [f for f in filter_findings(sca_raw, "sca", filters) if f.repo not in ignored_repos]
+    secrets = [f for f in secrets_raw if f.repo not in ignored_repos]
 
     findings_by_type = {"SAST": sast, "SCA": sca, "Secrets": secrets}
     if "SAST" in active_types:

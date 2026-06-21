@@ -165,6 +165,13 @@ secrets:
   validation_state: [VALIDATION_STATE_CONFIRMED_VALID]
 ```
 
+**Ignored repos:** add a top-level `ignore_repos` list to `filters.yaml` to silently drop findings from specific repos across all three finding types:
+
+```yaml
+ignore_repos:
+  - dummy_repo_for_commit_scanning
+```
+
 **Semantics:** all keys within a block must match (AND); all values within a list match as OR. Unknown keys and unknown board types cause a hard failure at load time — typos are caught immediately. Non-list values (e.g. `severity: HIGH` instead of `severity: [HIGH]`) also fail with a clear error.
 
 **Supported filter keys per board type:**

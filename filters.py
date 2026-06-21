@@ -57,8 +57,11 @@ SCALAR_PARAMS: frozenset[str] = frozenset({"confidence"})
 _SECRETS_SCALAR_PARAMS: frozenset[str] = frozenset({"tab"})
 
 
-def load_filters(path: Path | None) -> dict[str, dict[str, list[str]]]:
+def load_filters(path: Path | None) -> dict:
     """Parse a filters YAML file and return {board_type: {filter_key: [values]}}.
+
+    Also handles the top-level ``ignore_repos`` key (list of repo names to
+    exclude from all finding types after fetching).
 
     Returns {} if path is None or the file does not exist.
     Raises ValueError on unknown board types, unknown filter keys, non-list values,
@@ -68,7 +71,13 @@ def load_filters(path: Path | None) -> dict[str, dict[str, list[str]]]:
         return {}
 
     raw = yaml.safe_load(path.read_text()) or {}
-    result: dict[str, dict[str, list[str]]] = {}
+    result: dict = {}
+
+    ignore_repos = raw.pop("ignore_repos", None)
+    if ignore_repos is not None:
+        if not isinstance(ignore_repos, list):
+            raise ValueError("'ignore_repos' must be a list of repo name strings.")
+        result["ignore_repos"] = [str(r) for r in ignore_repos]
 
     for board_type, block in raw.items():
         if board_type not in ALLOWED_FILTERS:
@@ -179,6 +188,11 @@ def to_secrets_filter_body(filters: dict) -> dict:
 
         result[api_param] = values[0] if api_param in _SECRETS_SCALAR_PARAMS else values
     return result
+
+
+def get_ignored_repos(filters: dict) -> set[str]:
+    """Return the set of repo names to exclude from all finding types."""
+    return set(filters.get("ignore_repos", []))
 
 
 def has_malicious_filter(filters: dict) -> bool:

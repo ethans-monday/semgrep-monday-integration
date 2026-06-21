@@ -48,6 +48,11 @@
 #                          (single value only — scalar param)
 #     exclude_historical — [true]  (boolean trigger: filters out historical secrets)
 
+# --- Repos to exclude from all finding types (applied after fetching) ---
+# Findings from these repos are silently dropped regardless of type or filter config.
+ignore_repos:
+  - dummy_repo_for_commit_scanning
+
 # --- Recommended: only open findings (pairs with --set-triage-reviewing) ---
 # The sync script triages each finding to "reviewing" in Semgrep after creating
 # the monday item. Filtering by open status ensures already-reviewed findings
