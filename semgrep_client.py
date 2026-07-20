@@ -11,6 +11,7 @@ Secrets use the v2 Issues API:
 """
 
 from dataclasses import dataclass
+from urllib.parse import urlencode
 
 import time
 
@@ -52,7 +53,7 @@ class SemgrepClient:
     def _get(self, url: str, params: dict | None = None) -> dict:
         for attempt in range(_MAX_RETRIES):
             try:
-                print(f"  [semgrep] GET {url}" + (f"?{'&'.join(f'{k}={v}' for k, v in params.items())}" if params else ""))
+                print(f"  [semgrep] GET {url}" + (f"?{urlencode(params, doseq=True)}" if params else ""))
                 response = httpx.get(url, headers=self._headers, params=params, timeout=_TIMEOUT)
                 if response.status_code != 200:
                     raise SemgrepAPIError(

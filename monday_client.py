@@ -170,7 +170,11 @@ class MondayClient:
         return items
 
     def get_items_by_ids(self, item_ids: list[str], column_ids: list[str]) -> list[dict]:
-        """Fetch specific items by ID with specified column values."""
+        """Fetch specific items by ID with specified column values.
+
+        monday.com's `items(ids: ...)` argument is capped at 100 IDs per call;
+        this method transparently batches larger lists.
+        """
         query = """
         query ($itemIds: [ID!], $columnIds: [String!]) {
           items(ids: $itemIds) {
@@ -182,8 +186,13 @@ class MondayClient:
           }
         }
         """
-        data = self._post(query, {"itemIds": item_ids, "columnIds": column_ids})
-        return data["data"]["items"]
+        BATCH_SIZE = 100
+        results: list[dict] = []
+        for i in range(0, len(item_ids), BATCH_SIZE):
+            batch = item_ids[i : i + BATCH_SIZE]
+            data = self._post(query, {"itemIds": batch, "columnIds": column_ids})
+            results.extend(data["data"]["items"])
+        return results
 
     def change_column_values(self, item_id: str, column_values: dict) -> str:
         """Update column values on an existing item.

@@ -296,8 +296,8 @@ def test_sca_grouping_creates_single_item(httpx_mock, env_vars, state_file):
     state = json.loads(state_file.read_text())
     assert sync.synced_finding_ids(state, "SCA") == {"201", "202"}
     assert len(state["monday_items_created"]["SCA"]) == 1
-    item_fids = list(state["monday_items_created"]["SCA"].values())[0]
-    assert sorted(item_fids) == ["201", "202"]
+    item_entry = list(state["monday_items_created"]["SCA"].values())[0]
+    assert sorted(item_entry["finding_ids"]) == ["201", "202"]
 
 
 def test_set_triage_reviewing_flag(httpx_mock, env_vars, state_file):
