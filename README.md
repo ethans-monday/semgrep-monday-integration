@@ -126,16 +126,19 @@ Without the flag, triage is skipped and dedup relies entirely on `state.json`.
 Pass `--mark-fixed` to run a reconciliation pass **after** the normal sync. It updates existing monday items whose state in Semgrep has changed since they were created.
 
 ```bash
-python sync.py --mark-fixed              # sync + reconcile in one invocation
-python sync.py --mark-fixed --dry-run    # preview what would change
-python sync.py --mark-fixed --type sca   # limit reconciliation to SAST or SCA
+python sync.py --mark-fixed                       # sync + reconcile in one invocation
+python sync.py --mark-fixed --dry-run             # preview what would change
+python sync.py --mark-fixed --type sca            # limit reconciliation to SAST or SCA
+python sync.py --mark-fixed --fixed-since-days 7  # only consider findings fixed in the past 7 days
 ```
 
-The reconciliation groups state.json's tracked items by repo, then for each repo consults Semgrep:
+Under the hood, reconciliation uses Semgrep's v2 Issues API to avoid per-repo round-trips:
 
-1. **`fetch_project(repo)` returns 404** → the repo is no longer in Semgrep (archived, deleted, permissions changed). All tracked items for that repo get their "Triage State" set to `Not scanned by Semgrep` and their state entries migrate from `state.json` to `not_scanned_state.json`.
-2. **Project exists but has no `primary_branch` / `default_branch`** → transient / misconfigured; the script logs a warning and leaves state untouched.
-3. **Project has a resolvable primary branch** → fetch `status=fixed&repos=<repo>&ref=<primary>` (server-side filtered so each call is small even for large deployments). Any tracked item whose `finding_ids` intersect the returned "fixed on main" set gets its "Triage State" set to `Fixed` and its state entry migrates to `fixed_state.json`.
+1. **Bulk `/projects` fetch** — one paginated call. Semgrep excludes archived repos from this list, so absence from it is our "no longer scanned" signal.
+2. **v2 `/issues` fetch** — one paginated call per board type with filter `{aggregateIssueStates: [AGGREGATE_ISSUE_STATE_FIXED], onPrimaryBranch: true}` (plus optional `timeFilter: TIME_FILTER_FIXED_AT` + `since` when `--fixed-since-days N` is set). Returns all fixed findings across all repos in one stream.
+3. **Match + mark:**
+   - Any state.json entry whose repo is **absent from the projects list** → "Triage State" = `Not scanned by Semgrep`, migrated to `not_scanned_state.json`.
+   - Any state.json entry whose `finding_ids` intersect the v2 fixed-on-primary set → "Triage State" = `Fixed`, migrated to `fixed_state.json`.
 
 `state.json` v5 stores the `repo` per item alongside its finding IDs, populated at item creation time. Pre-v5 entries have `repo=""` and are backfilled lazily via monday's "Repo" column the first time `--mark-fixed` runs against them.
 

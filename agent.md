@@ -98,15 +98,17 @@ python sync.py --mark-fixed                 # after sync, reconcile items: mark 
 
 `--mark-fixed` triggers a reconciliation pass **after** the normal sync completes in the same invocation. It only touches SAST and SCA (Secrets already has its own fixed-pass baked into the sync).
 
-Flow, per board type, grouped by repo (from state.json v5's `repo` field):
+Flow (v2 API — collapses per-repo work into a small handful of paginated calls):
 
 1. **Backfill:** for state entries with `repo=""` (pre-v5 migrations), call monday `get_items_by_ids` on the "Repo" column and fill it in. Save state.json immediately so backfill isn't lost if a later step bails.
-2. For each repo call `fetch_project(repo)` and dispatch:
-   - **`None`** (Semgrep 404): mark all this repo's items `Not scanned by Semgrep` via `change_column_values(item_id, {"Triage State": {"label": "Not scanned by Semgrep"}})`, migrate entries from `state.json` → `not_scanned_state.json`.
-   - **exists but no `primary_branch` / `default_branch`**: log a warning, skip the repo, leave state untouched.
-   - **branch resolvable**: fetch `GET /findings?status=fixed&repos=<repo>&ref=<primary>&issue_type=<board>` (server-side filter → small response). For each item whose `finding_ids` intersect the fetched IDs, mark `Fixed` and migrate entries `state.json` → `fixed_state.json`.
+2. **Bulk `/projects` fetch** — one paginated call. Semgrep excludes archived repos, so `repo not in active_repo_names` = "not scanned anymore."
+3. **v2 fixed-findings fetch** — one paginated call per board type via `POST /api/agent/deployments/{id}/issues` with `{aggregateIssueStates: [AGGREGATE_ISSUE_STATE_FIXED], onPrimaryBranch: true}`. When `--fixed-since-days N` is set, adds `timeFilter: TIME_FILTER_FIXED_AT` and `since: <ISO cutoff>` to limit to recent transitions.
+4. **Dispatch per state entry:**
+   - Repo absent from active-projects list → mark `Not scanned by Semgrep`, migrate to `not_scanned_state.json`.
+   - Finding IDs intersect the fetched fixed-on-primary set → mark `Fixed`, migrate to `fixed_state.json`.
+   - Otherwise → leave state untouched.
 
-`--dry-run` prints candidates without touching monday or state files. `--type sast` / `--type sca` narrows scope. Even with `--dry-run` the backfill step is skipped (state.json isn't written during dry-run).
+`--dry-run` prints candidates without touching monday or state files. `--type sast` / `--type sca` narrows scope. `--fixed-since-days N` narrows the v2 fetch to findings fixed in the last N days. Even with `--dry-run` the backfill step is skipped (state.json isn't written during dry-run).
 
 ## Filtering
 

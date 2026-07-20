@@ -1163,26 +1163,6 @@ def _project_primary_branch(project: dict | None) -> str:
     return project.get("primary_branch") or project.get("default_branch") or ""
 
 
-def _fetch_fixed_on_ref(
-    semgrep: SemgrepClient, issue_type: str, repo: str, ref: str,
-) -> list[Finding]:
-    """Fetch fixed findings for one repo on one ref (primary branch).
-
-    Server-side filter — one paged query per repo. Semgrep also honors an
-    empty `repos` value, but we always pass a concrete repo name here.
-    """
-    return semgrep.fetch_findings(
-        issue_type,
-        max_findings=1_000_000,
-        extra_params={
-            "status": "fixed",
-            "repos": repo,
-            "ref": ref,
-            "dedup": "true",
-        },
-    )
-
-
 def _backfill_repos_from_monday(
     state: dict, board_type: str, client: MondayClient,
 ) -> int:
@@ -1223,25 +1203,30 @@ def mark_fixed(
     filters_path: Path | None = DEFAULT_FILTERS_FILE,
     types: set[str] | None = None,
     dry_run: bool = False,
+    fixed_since: str | None = None,
 ) -> None:
-    """Reconcile monday items with fixed / not-scanned state in Semgrep.
+    """Reconcile monday items with fixed / not-scanned state in Semgrep (v2 API).
 
-    Three cases per repo:
-      1. `fetch_project(repo) → None`: repo no longer scanned by Semgrep
-         (archived / deleted / permissions changed). Mark items
-         "Not scanned by Semgrep", migrate to `not_scanned_state.json`.
-      2. Project exists but no `primary_branch` / `default_branch`: log a
-         warning, skip the repo — leaves state.json untouched.
-      3. Project has a resolvable primary branch: fetch
-         `status=fixed&repos=<repo>&ref=<primary_branch>&issue_type=<board>`,
-         intersect returned IDs with each item's tracked `finding_ids`; on
-         match, set "Triage State" → "Fixed", migrate to `fixed_state.json`.
+    Approach:
+      1. Bulk-fetch `/projects` once. Semgrep's list-projects endpoint
+         excludes archived repos, so absence-from-this-list is our
+         signal for "not scanned anymore."
+      2. Per board_type (SAST/SCA), call the v2 `/issues` endpoint with
+         `aggregateIssueStates=[AGGREGATE_ISSUE_STATE_FIXED]` and
+         `onPrimaryBranch=true`. Optionally add
+         `timeFilter=TIME_FILTER_FIXED_AT` + `since=<fixed_since>` to
+         narrow to recent transitions.
+      3. Intersect the returned finding IDs with each state entry's
+         `finding_ids`; on match, set "Triage State" -> "Fixed" and
+         migrate the entry to `fixed_state.json`.
+      4. For any state.json repo absent from the bulk projects list,
+         mark all its items "Not scanned by Semgrep" and migrate to
+         `not_scanned_state.json`.
 
-    Backfill: state.json v5 entries carry a `repo` field; older entries
-    migrated from v4 have `repo=""` and are backfilled once via monday's
-    "Repo" column at the start of this pass.
+    Backfill: pre-v5 entries with `repo=""` are backfilled once via
+    monday's "Repo" column at the start of this pass.
 
-    Only applies to SAST and SCA — Secrets has its own fixed-pass in run().
+    Only SAST and SCA. Secrets has its own fixed-pass in run().
     """
     print("\n\n############################################")
     print("### Reconciling fixed / not-scanned items ###")
@@ -1289,30 +1274,23 @@ def mark_fixed(
             filled = _backfill_repos_from_monday(state, board_type, boards[board_type]["client"])
             if filled:
                 print(f"  [{board_type}] backfilled repo for {filled} state entries")
-        # Persist backfill immediately so we don't repeat monday work if we bail below
         if not dry_run:
             save_state(state, state_path)
 
-    # Project lookup cache: repo → ("missing" | "no_branch" | ref)
-    project_cache: dict[str, str] = {}
-
-    def _project_status(repo: str) -> str:
-        if repo not in project_cache:
-            project = semgrep.fetch_project(repo)
-            if project is None:
-                project_cache[repo] = "missing"
-            else:
-                branch = _project_primary_branch(project)
-                project_cache[repo] = branch if branch else "no_branch"
-        return project_cache[repo]
+    # --- Bulk-fetch projects once. Excludes archived repos server-side. ---
+    print("\n=== Fetching active projects from Semgrep ===")
+    try:
+        active_projects = semgrep.fetch_projects()
+    except SemgrepAPIError as exc:
+        print(f"Semgrep API error fetching /projects: {exc}")
+        return
+    active_repo_names: set[str] = {p["name"] for p in active_projects if p.get("name")}
+    print(f"  {len(active_repo_names)} active projects returned by Semgrep")
 
     total_marked_fixed = 0
     total_marked_not_scanned = 0
-    # Per-board_type stats for the final summary
     stats: dict[str, dict[str, int]] = {}
-    # Union sets across board types
-    missing_repos: set[str] = set()
-    no_branch_repos: set[str] = set()
+    not_scanned_repos_union: set[str] = set()
 
     for board_type in sorted(active_types):
         issue_type = board_type.lower()
@@ -1324,11 +1302,9 @@ def mark_fixed(
         s = stats[board_type] = {
             "tracked": len(entries),
             "no_repo_items": 0,
-            "repos_checked": 0,
-            "repos_missing": 0,
-            "items_in_missing_repos": 0,
-            "repos_no_branch": 0,
-            "items_in_no_branch_repos": 0,
+            "repos_tracked": 0,
+            "repos_not_scanned": 0,
+            "items_in_not_scanned_repos": 0,
             "fixed_findings_seen": 0,
             "items_marked_fixed": 0,
             "items_marked_not_scanned": 0,
@@ -1341,7 +1317,7 @@ def mark_fixed(
             print(f"  Warning: 'Triage State' column not found on {board_type} board. Skipping.")
             continue
 
-        # Group entries by repo. Items without a repo (backfill failure) are skipped.
+        # Group entries by repo. Items lacking repo (backfill miss) are skipped.
         by_repo: dict[str, dict[str, dict]] = {}
         no_repo_items: list[str] = []
         for iid, entry in entries.items():
@@ -1353,23 +1329,42 @@ def mark_fixed(
                 continue
             by_repo.setdefault(repo, {})[iid] = entry
         s["no_repo_items"] = len(no_repo_items)
+        s["repos_tracked"] = len(by_repo)
         if no_repo_items:
             print(f"  Warning: {len(no_repo_items)} {board_type} items lack repo — skipping them")
 
-        for repo in sorted(by_repo):
-            repo_items = by_repo[repo]
-            status = _project_status(repo)
-            s["repos_checked"] += 1
+        # --- Fetch fixed findings via v2 in one paginated stream ---
+        print(f"\n=== Fetching fixed {board_type} findings from Semgrep (v2) ===")
+        if fixed_since:
+            print(f"  Filter: onPrimaryBranch=true, aggregateIssueStates=FIXED, since={fixed_since}")
+        else:
+            print(f"  Filter: onPrimaryBranch=true, aggregateIssueStates=FIXED (all time)")
+        try:
+            fixed = semgrep.fetch_fixed_issues_v2(issue_type=issue_type, since=fixed_since)
+        except SemgrepAPIError as exc:
+            print(f"  Semgrep API error: {exc}")
+            continue
+        s["fixed_findings_seen"] = len(fixed)
+        print(f"  {len(fixed)} fixed findings on primary branches returned")
+        fixed_ids = {f.id for f in fixed}
 
-            # Case 1: project 404 → Not scanned
-            if status == "missing":
-                s["repos_missing"] += 1
-                s["items_in_missing_repos"] += len(repo_items)
-                missing_repos.add(repo)
-                print(f"  [{repo}] project not found in Semgrep — marking {len(repo_items)} items 'Not scanned by Semgrep'")
+        # --- Case A: items in repos NOT in Semgrep's active-projects list ---
+        not_scanned_this_type: set[str] = set()
+        for repo in by_repo:
+            if repo not in active_repo_names:
+                not_scanned_this_type.add(repo)
+        s["repos_not_scanned"] = len(not_scanned_this_type)
+        s["items_in_not_scanned_repos"] = sum(len(by_repo[r]) for r in not_scanned_this_type)
+        not_scanned_repos_union.update(not_scanned_this_type)
+
+        if not_scanned_this_type:
+            print(f"\n  {len(not_scanned_this_type)} tracked repos not in Semgrep's active projects list — marking their items 'Not scanned by Semgrep'")
+            for repo in sorted(not_scanned_this_type):
+                repo_items = by_repo[repo]
+                print(f"    [{repo}] {len(repo_items)} items")
                 for iid, entry in sorted(repo_items.items()):
                     if dry_run:
-                        print(f"    [DRY RUN] {board_type} item {iid}: mark 'Not scanned by Semgrep' (findings: {item_finding_ids(entry)})")
+                        print(f"      [DRY RUN] {board_type} item {iid}: mark 'Not scanned by Semgrep' (findings: {item_finding_ids(entry)})")
                         s["items_marked_not_scanned"] += 1
                         total_marked_not_scanned += 1
                         continue
@@ -1379,42 +1374,26 @@ def mark_fixed(
                         not_scanned_state.setdefault(board_type, {})[iid] = entry
                         s["items_marked_not_scanned"] += 1
                         total_marked_not_scanned += 1
-                        print(f"    [{board_type}] item {iid} → Not scanned by Semgrep")
+                        print(f"      [{board_type}] item {iid} → Not scanned by Semgrep")
                     except Exception as exc:
-                        print(f"    [{board_type}] Failed to mark item {iid}: {exc}")
-                continue
+                        print(f"      [{board_type}] Failed to mark item {iid}: {exc}")
 
-            # Case 2: project exists but no branch → warn, skip (no changes)
-            if status == "no_branch":
-                s["repos_no_branch"] += 1
-                s["items_in_no_branch_repos"] += len(repo_items)
-                no_branch_repos.add(repo)
-                print(f"  [{repo}] project has no primary_branch/default_branch — skipping (no changes)")
+        # --- Case B: for active repos, mark items whose finding_ids match fixed_ids ---
+        items_to_mark: list[tuple[str, str, dict]] = []  # (repo, iid, entry)
+        for repo, repo_items in by_repo.items():
+            if repo in not_scanned_this_type:
                 continue
-
-            # Case 3: fetch fixed findings on primary branch
-            primary = status  # It's the ref string
-            try:
-                fixed = _fetch_fixed_on_ref(semgrep, issue_type, repo, primary)
-            except SemgrepAPIError as exc:
-                print(f"  [{repo}] Semgrep API error: {exc}")
-                continue
-            s["fixed_findings_seen"] += len(fixed)
-            fixed_ids = {f.id for f in fixed}
-            items_to_mark: list[tuple[str, dict]] = []
             for iid, entry in repo_items.items():
                 my_fids = set(item_finding_ids(entry))
                 if my_fids & fixed_ids:
-                    items_to_mark.append((iid, entry))
-            if not items_to_mark:
-                if fixed:
-                    print(f"  [{repo}] {len(fixed)} fixed on {primary}; none match tracked findings")
-                continue
-            print(f"  [{repo}] {len(fixed)} fixed on {primary}; {len(items_to_mark)} monday items to mark Fixed")
-            for iid, entry in sorted(items_to_mark):
+                    items_to_mark.append((repo, iid, entry))
+
+        if items_to_mark:
+            print(f"\n  {len(items_to_mark)} {board_type} monday items to mark Fixed")
+            for repo, iid, entry in sorted(items_to_mark):
                 intersect = [fid for fid in item_finding_ids(entry) if fid in fixed_ids]
                 if dry_run:
-                    print(f"    [DRY RUN] {board_type} item {iid}: findings {item_finding_ids(entry)} (fixed on main: {intersect})")
+                    print(f"    [DRY RUN] {board_type} item {iid} ({repo}): findings {item_finding_ids(entry)} (fixed on main: {intersect})")
                     s["items_marked_fixed"] += 1
                     total_marked_fixed += 1
                     continue
@@ -1424,7 +1403,7 @@ def mark_fixed(
                     fixed_state.setdefault(board_type, {})[iid] = entry
                     s["items_marked_fixed"] += 1
                     total_marked_fixed += 1
-                    print(f"    [{board_type}] item {iid} → Fixed (findings: {item_finding_ids(entry)})")
+                    print(f"    [{board_type}] item {iid} ({repo}) → Fixed (findings: {item_finding_ids(entry)})")
                 except Exception as exc:
                     print(f"    [{board_type}] Failed to mark item {iid}: {exc}")
 
@@ -1437,16 +1416,13 @@ def mark_fixed(
         print(f"    Tracked items in state.json:                     {s['tracked']}")
         if s['no_repo_items']:
             print(f"    Items missing repo (skipped this run):           {s['no_repo_items']}")
-        print(f"    Distinct repos checked:                          {s['repos_checked']}")
-        print(f"    Fixed findings seen on primary branch:           {s['fixed_findings_seen']}")
-        print(f"    Repos not in Semgrep (404):                      {s['repos_missing']} ({s['items_in_missing_repos']} items)")
-        print(f"    Repos with no primary_branch/default_branch:     {s['repos_no_branch']} ({s['items_in_no_branch_repos']} items untouched)")
+        print(f"    Distinct tracked repos:                          {s['repos_tracked']}")
+        print(f"    Fixed findings on primary branches (v2 fetch):   {s['fixed_findings_seen']}")
+        print(f"    Repos not in active projects list:               {s['repos_not_scanned']} ({s['items_in_not_scanned_repos']} items)")
         print(f"    Items {prefix}marked Fixed:                        {s['items_marked_fixed']}")
         print(f"    Items {prefix}marked Not scanned by Semgrep:       {s['items_marked_not_scanned']}")
-    if missing_repos:
-        print(f"\n  Missing repos ({len(missing_repos)}): {', '.join(sorted(missing_repos))}")
-    if no_branch_repos:
-        print(f"  Repos with no branch ({len(no_branch_repos)}): {', '.join(sorted(no_branch_repos))}")
+    if not_scanned_repos_union:
+        print(f"\n  Not-scanned repos ({len(not_scanned_repos_union)}): {', '.join(sorted(not_scanned_repos_union))}")
 
     if dry_run:
         print(f"\n[DRY RUN] No monday items updated, no state files modified.")
@@ -1474,6 +1450,8 @@ if __name__ == "__main__":
                         help="Fetch findings and print IDs without creating monday items or updating state")
     parser.add_argument("--mark-fixed", action="store_true",
                         help="After the normal sync, reconcile existing monday items: mark items 'Fixed' when their finding is resolved on the repo's primary branch, and 'Not scanned by Semgrep' when the repo is no longer in Semgrep. SAST + SCA only.")
+    parser.add_argument("--fixed-since-days", type=int, default=None, metavar="N",
+                        help="With --mark-fixed: only consider findings fixed in the last N days (server-side filter via TIME_FILTER_FIXED_AT). Speeds up scheduled runs.")
     args = parser.parse_args()
 
     if args.type:
@@ -1497,5 +1475,10 @@ if __name__ == "__main__":
         set_triage_reviewing=args.set_triage_reviewing, dry_run=args.dry_run,
         no_dedup=args.no_dedup)
     if args.mark_fixed:
+        fixed_since_iso: str | None = None
+        if args.fixed_since_days is not None:
+            from datetime import datetime, timedelta, timezone
+            cutoff = datetime.now(timezone.utc) - timedelta(days=args.fixed_since_days)
+            fixed_since_iso = cutoff.strftime("%Y-%m-%dT%H:%M:%SZ")
         mark_fixed(filters_path=resolved_filters_path, types=resolved_types,
-                   dry_run=args.dry_run)
+                   dry_run=args.dry_run, fixed_since=fixed_since_iso)

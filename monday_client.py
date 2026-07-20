@@ -175,9 +175,11 @@ class MondayClient:
         monday.com's `items(ids: ...)` argument is capped at 100 IDs per call;
         this method transparently batches larger lists.
         """
+        # NB: monday's `items()` defaults to `limit: 25` — silently truncates
+        # larger id lists. `limit: 100` matches the ids-per-call cap.
         query = """
-        query ($itemIds: [ID!], $columnIds: [String!]) {
-          items(ids: $itemIds) {
+        query ($itemIds: [ID!], $columnIds: [String!], $limit: Int!) {
+          items(ids: $itemIds, limit: $limit) {
             id
             column_values(ids: $columnIds) {
               id
@@ -190,7 +192,7 @@ class MondayClient:
         results: list[dict] = []
         for i in range(0, len(item_ids), BATCH_SIZE):
             batch = item_ids[i : i + BATCH_SIZE]
-            data = self._post(query, {"itemIds": batch, "columnIds": column_ids})
+            data = self._post(query, {"itemIds": batch, "columnIds": column_ids, "limit": BATCH_SIZE})
             results.extend(data["data"]["items"])
         return results
 
