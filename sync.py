@@ -999,6 +999,7 @@ def run(
         if "SAST" in active_types:
             print("\n=== Fetching SAST findings from Semgrep ===")
             sast_raw = semgrep.fetch_findings("sast", extra_params={**to_query_params("sast", filters), **dedup_params}, **fetch_kwargs)
+            print(f"  SAST: {len(sast_raw)} fetched")
             print("\n=== Fetching AI SAST findings from Semgrep ===")
             ai_sast_raw = semgrep.fetch_findings("ai_sast", extra_params={**to_query_params("sast", filters), **dedup_params}, **fetch_kwargs)
             seen_ids = {f.id for f in sast_raw}
@@ -1007,6 +1008,7 @@ def run(
         if "SCA" in active_types:
             print("\n=== Fetching SCA findings from Semgrep ===")
             sca_raw = semgrep.fetch_findings("sca", extra_params={**to_query_params("sca", filters), **dedup_params}, **fetch_kwargs)
+            print(f"  SCA: {len(sca_raw)} fetched")
             if has_malicious_filter(filters):
                 print("\n=== Fetching SCA malicious findings (second pass) ===")
                 malicious_raw = semgrep.fetch_findings("sca", extra_params={**to_malicious_query_params(), **dedup_params}, **fetch_kwargs)
@@ -1016,6 +1018,7 @@ def run(
         if "Secrets" in active_types:
             print("\n=== Fetching open Secrets findings from Semgrep ===")
             secrets_raw = semgrep.fetch_secrets(filter_params=to_secrets_filter_body(filters), **fetch_kwargs)
+            print(f"  Secrets open: {len(secrets_raw)} fetched")
             print("\n=== Fetching fixed Secrets findings from Semgrep ===")
             fixed_filter = {k: v for k, v in to_secrets_filter_body(filters).items() if k != "tab"}
             fixed_filter["aggregateIssueStates"] = ["AGGREGATE_ISSUE_STATE_FIXED"]
