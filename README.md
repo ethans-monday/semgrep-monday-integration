@@ -76,7 +76,8 @@ This creates three boards (Semgrep SAST Findings, Semgrep SCA Findings, Semgrep 
 
 ```bash
 python sync.py                            # sync all open findings
-python sync.py --limit 50                 # sync up to 50 per type (for testing)
+python sync.py --limit 50                 # create at most 50 monday items per type (for testing)
+python sync.py --fetch-limit 500          # cap Semgrep fetch at 500 findings per type (default: 10000)
 python sync.py --set-triage-reviewing     # also triage findings in Semgrep
 python sync.py --dry-run                  # fetch and print finding IDs, no side effects
 python sync.py --mark-fixed               # after sync, reconcile items: mark Fixed / Not scanned by Semgrep (SAST + SCA)
@@ -148,9 +149,22 @@ Secrets are not handled by `--mark-fixed` — Secrets already has its own fixed-
 
 The script tracks synced findings in `state.json` as a fallback. Running it multiple times is safe -- findings already synced are skipped. This makes it suitable for cron jobs or scheduled runs.
 
-### The --limit flag
+### The --limit and --fetch-limit flags
 
-Use `--limit N` to cap the number of findings fetched per type. Useful for initial testing or when you want to gradually populate boards.
+- `--limit N` — target number of monday items to **create** per board type this run. The fetch loop stops as soon as `N` post-filter, post-grouping, post-dedup-against-state items have been collected. Semgrep API calls stop early — no over-fetching.
+- `--fetch-limit N` — safety cap on total findings fetched per issue_type from Semgrep (default: 10000). Guards against a pathological filter paging forever.
+
+**How SAST fetching works with `--limit`:**
+
+SAST pulls from two Semgrep endpoints (`issue_type=sast` and `issue_type=ai_sast`), iterated sequentially. If the SAST endpoint alone produces enough items to reach `--limit`, the AI SAST endpoint is **not called at all** — no wasted API calls. AI SAST is only fetched when SAST is exhausted or insufficient.
+
+SCA uses the same pattern but with **malicious packages fetched first**, then regular SCA. Malicious findings are severe, so they are prioritized — a small `--limit` cannot starve them.
+
+**Page-size hint.** When `--limit N` is set, the client requests pages of size `min(max(100, N × 3), 3000)` — small pages when you only need a few items, larger pages when you need many. Semgrep's v1 API requires `100 ≤ page_size ≤ 3000`.
+
+**Example:** `--limit 10` fetches with `page_size=100`. If the first page produces ≥10 items after filtering and grouping, one API call is made and the sync stops there.
+
+**Yield-rate caveat.** Because grouping + client-side filters (`file_risk_level`, `ai_verdict: [not_analyzed]`) collapse and drop findings, more findings are fetched than items created. Roughly: `raw_fetched ≈ items × (filter_pass_rate × group_compression)⁻¹`. If your filter drops most findings, more pages are needed.
 
 ### Filtering
 
@@ -306,7 +320,7 @@ No documented rate limits for the findings REST API. The script uses reasonable 
 
 **404 on findings endpoint** -- verify your deployment slug is correct. It should match the URL path at `semgrep.dev/orgs/<slug>`, not your org display name.
 
-**Rate limited (429 errors)** -- the script auto-retries up to 3 times, honouring the `Retry-After` header. If you're on a free monday.com plan with 200 calls/day, use `--limit` to stay within budget.
+**Rate limited (429 errors)** -- the script auto-retries up to 3 times, honouring the `Retry-After` header. If you're on a free monday.com plan with 200 calls/day, use `--limit` to cap monday items created per run and stay within budget.
 
 **Update post failed: ...** -- the monday.com item was created but the Updates-feed body couldn't be posted (usually a transient network reset). The finding is still recorded in state; only the rich update body is missing. Re-running will not re-attempt the failed update.
 
@@ -318,7 +332,7 @@ After the normal open secrets fetch, the script performs a second Secrets fetch 
 
 This catches secrets that were committed and immediately rotated/fixed before the sync ran, which would otherwise never be reviewed.
 
-Results are merged with the open secrets fetch and deduplicated by finding ID. No extra configuration is needed — this second pass always runs when the Secrets board is active. The fixed fetch is not subject to `--limit` so a cap on open findings never causes unreviewed fixed findings to be missed; it pages through all fixed secrets regardless.
+Results are merged with the open secrets fetch and deduplicated by finding ID. No extra configuration is needed — this second pass always runs when the Secrets board is active. The fixed fetch is not subject to `--fetch-limit` so a cap on open findings never causes unreviewed fixed findings to be missed; it pages through all fixed secrets regardless.
 
 Because the Semgrep triage API silently ignores writes to FIXED findings (returns 200 but applies nothing), a separate `fixed_state.json` file is written alongside `state.json` to track which fixed-secret IDs have already been synced. A fixed finding is skipped if its ID is in `fixed_state.json` or if its `note` already contains `monday.com`.
 

@@ -370,7 +370,8 @@ def test_fetch_findings_pagination_not_overridden(httpx_mock):
 
     req = httpx_mock.get_requests()[0]
     assert req.url.params["page"] == "0"
-    assert req.url.params["page_size"] == "1"
+    # Semgrep v1 API requires page_size >= 100; loop clamps regardless of max_findings.
+    assert req.url.params["page_size"] == "100"
 
 
 # ---------------------------------------------------------------------------
