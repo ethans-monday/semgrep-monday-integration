@@ -97,6 +97,23 @@ def _mock_clients(sast=None, sca=None, secrets=None):
     semgrep.fetch_findings.side_effect = lambda issue_type, **kw: (
         (sast or []) if issue_type in ("sast", "ai_sast") else (sca or [])
     )
+    # iter_findings_pages yields one page (list) then stops. SAST source yields
+    # the sast list, ai_sast/malicious yield empty (so target-based fetch works).
+    def _iter_pages(issue_type, *a, **kw):
+        if issue_type == "sast":
+            data = sast or []
+        elif issue_type == "sca":
+            # Distinguish primary SCA vs malicious second-pass by extra_params.
+            extra = (a[1] if len(a) > 1 else kw.get("extra_params")) or {}
+            if extra.get("is_malicious") == "true":
+                data = []
+            else:
+                data = sca or []
+        else:  # ai_sast
+            data = []
+        if data:
+            yield list(data)
+    semgrep.iter_findings_pages.side_effect = _iter_pages
     semgrep.fetch_secrets.return_value = secrets or []
 
     monday_mocks = {}

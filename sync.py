@@ -4,7 +4,8 @@ Usage:
     python setup_boards.py             # one-time: create boards + columns
     cp .env.example .env               # fill in credentials + board IDs
     python sync.py                     # sync all findings
-    python sync.py --limit 50          # sync up to 50 per type
+    python sync.py --limit 50          # create at most 50 monday items per type this run
+    python sync.py --fetch-limit 500   # fetch at most 500 findings per type from Semgrep
     python sync.py --filters my.yaml              # apply custom filters file
     python sync.py --no-filters                   # skip filtering even if filters.yaml exists
     python sync.py --set-triage-reviewing         # triage synced findings to 'reviewing' in Semgrep
@@ -928,6 +929,54 @@ BOARD_CONFIG = {
 # Main
 # ---------------------------------------------------------------------------
 
+def _count_new_items(
+    raw: list[Finding],
+    board_type: str,
+    filters: dict,
+    ignored_repos: set,
+    already_synced: set,
+) -> int:
+    """How many monday items would be created if we stopped fetching now?"""
+    filtered, _ = filter_findings(raw, board_type.lower(), filters)
+    filtered = [f for f in filtered if f.repo not in ignored_repos]
+    new = [f for f in filtered if f.id not in already_synced]
+    return len(group_findings(new, board_type))
+
+
+def _fetch_until_target(
+    page_sources: list,
+    board_type: str,
+    filters: dict,
+    ignored_repos: set,
+    already_synced: set,
+    target: int | None,
+) -> tuple[list, dict]:
+    """Iterate page generators sequentially; stop when ``target`` new items reached.
+
+    Args:
+        page_sources: list of ``(label, page_generator)`` pairs. Iterated in order.
+        target: Stop once ``target`` new post-filter/post-group items are collected;
+                ``None`` = drain all sources.
+
+    Returns:
+        (all_raw_deduped, per_source_counts).
+    """
+    all_raw: list[Finding] = []
+    seen: set = set()
+    counts: dict = {}
+    for label, gen in page_sources:
+        counts[label] = 0
+        for batch in gen:
+            new_in_batch = [f for f in batch if f.id not in seen]
+            all_raw.extend(new_in_batch)
+            seen.update(f.id for f in new_in_batch)
+            counts[label] += len(new_in_batch)
+            if target is not None and _count_new_items(all_raw, board_type, filters, ignored_repos, already_synced) >= target:
+                print(f"  [{board_type}] target of {target} new items reached from {label}; stopping fetch")
+                return all_raw, counts
+    return all_raw, counts
+
+
 def _filter_log(board_type: str, fetched: int, kept: int, filters: dict, breakdown: list[str] | None = None) -> str:
     block = filters.get(board_type, {})
     if not block:
@@ -945,12 +994,21 @@ def _filter_log(board_type: str, fetched: int, kept: int, filters: dict, breakdo
 def run(
     state_path: Path = DEFAULT_STATE_FILE,
     limit: int | None = None,
+    fetch_limit: int | None = None,
     filters_path: Path | None = DEFAULT_FILTERS_FILE,
     types: set[str] | None = None,
     set_triage_reviewing: bool = False,
     dry_run: bool = False,
     no_dedup: bool = False,
 ) -> None:
+    """Sync findings to monday.com.
+
+    Args:
+        limit: Max monday items to create per board type this run. Applied
+            after client-side filtering and grouping. None = unbounded.
+        fetch_limit: Max findings to fetch per issue_type from Semgrep. None
+            uses the client default (10_000).
+    """
     # types=None means all; validate against known board keys
     active_types = types if types is not None else set(BOARD_CONFIG)
     cfg = load_config()
@@ -993,39 +1051,57 @@ def run(
         account_slug = first_client.get_account_slug()
 
     # --- Fetch findings ---
-    fetch_kwargs = {} if limit is None else {"max_findings": limit}
+    fetch_safety_cap = fetch_limit if fetch_limit is not None else 10_000
+    # Page-size hint: when --limit is small, request small pages to avoid over-fetching.
+    # Multiplier accounts for client-side filter drop and grouping compression.
+    page_hint = min(max(100, limit * 3), 3000) if limit is not None else None
     dedup_params = {} if no_dedup else {"dedup": "true"}
+    ignored_repos = get_ignored_repos(filters)
     sast_raw: list[Finding] = []
     sca_raw: list[Finding] = []
     secrets_raw: list[Finding] = []
+    sast_counts: dict = {}
+    sca_counts: dict = {}
     try:
         if "SAST" in active_types:
             print("\n=== Fetching SAST findings from Semgrep ===")
-            sast_raw = semgrep.fetch_findings("sast", extra_params={**to_query_params("sast", filters), **dedup_params}, **fetch_kwargs)
-            print(f"  SAST: {len(sast_raw)} fetched")
-            print("\n=== Fetching AI SAST findings from Semgrep ===")
-            ai_sast_raw = semgrep.fetch_findings("ai_sast", extra_params={**to_query_params("sast", filters), **dedup_params}, **fetch_kwargs)
-            seen_ids = {f.id for f in sast_raw}
-            sast_raw.extend(f for f in ai_sast_raw if f.id not in seen_ids)
-            print(f"  AI SAST: {len(ai_sast_raw)} fetched, {len(sast_raw) - len(seen_ids)} merged (after dedup against SAST)")
+            sast_extra = {**to_query_params("sast", filters), **dedup_params}
+            sast_sources = [
+                ("SAST", semgrep.iter_findings_pages("sast", fetch_safety_cap, sast_extra, page_hint)),
+                ("AI SAST", semgrep.iter_findings_pages("ai_sast", fetch_safety_cap, sast_extra, page_hint)),
+            ]
+            sast_raw, sast_counts = _fetch_until_target(
+                sast_sources, "SAST", filters, ignored_repos,
+                synced_finding_ids(state, "SAST"), limit,
+            )
+            print(f"  SAST: {sast_counts.get('SAST', 0)} fetched, AI SAST: {sast_counts.get('AI SAST', 0)} merged (deduped)")
         if "SCA" in active_types:
             print("\n=== Fetching SCA findings from Semgrep ===")
-            sca_raw = semgrep.fetch_findings("sca", extra_params={**to_query_params("sca", filters), **dedup_params}, **fetch_kwargs)
-            print(f"  SCA: {len(sca_raw)} fetched")
+            # Malicious packages are severe — fetch first so a --limit cap can't starve them.
+            sca_sources = []
             if has_malicious_filter(filters):
-                print("\n=== Fetching SCA malicious findings (second pass) ===")
-                malicious_raw = semgrep.fetch_findings("sca", extra_params={**to_malicious_query_params(), **dedup_params}, **fetch_kwargs)
-                seen_ids = {f.id for f in sca_raw}
-                sca_raw.extend(f for f in malicious_raw if f.id not in seen_ids)
-                print(f"  SCA malicious second-pass: {len(malicious_raw)} fetched, {len(sca_raw) - len(seen_ids)} new")
+                sca_sources.append(
+                    ("SCA malicious", semgrep.iter_findings_pages("sca", fetch_safety_cap, {**to_malicious_query_params(), **dedup_params}, page_hint))
+                )
+            sca_sources.append(
+                ("SCA", semgrep.iter_findings_pages("sca", fetch_safety_cap, {**to_query_params("sca", filters), **dedup_params}, page_hint))
+            )
+            sca_raw, sca_counts = _fetch_until_target(
+                sca_sources, "SCA", filters, ignored_repos,
+                synced_finding_ids(state, "SCA"), limit,
+            )
+            if has_malicious_filter(filters):
+                print(f"  SCA malicious: {sca_counts.get('SCA malicious', 0)} fetched, SCA: {sca_counts.get('SCA', 0)} fetched")
+            else:
+                print(f"  SCA: {sca_counts.get('SCA', 0)} fetched")
         if "Secrets" in active_types:
             print("\n=== Fetching open Secrets findings from Semgrep ===")
-            secrets_raw = semgrep.fetch_secrets(filter_params=to_secrets_filter_body(filters), **fetch_kwargs)
+            secrets_raw = semgrep.fetch_secrets(filter_params=to_secrets_filter_body(filters), max_findings=fetch_safety_cap)
             print(f"  Secrets open: {len(secrets_raw)} fetched")
             print("\n=== Fetching fixed Secrets findings from Semgrep ===")
             fixed_filter = {k: v for k, v in to_secrets_filter_body(filters).items() if k != "tab"}
             fixed_filter["aggregateIssueStates"] = ["AGGREGATE_ISSUE_STATE_FIXED"]
-            fixed_raw = semgrep.fetch_secrets(filter_params=fixed_filter, **{k: v for k, v in fetch_kwargs.items() if k != "max_findings"})
+            fixed_raw = semgrep.fetch_secrets(filter_params=fixed_filter)
             seen_ids = {f.id for f in secrets_raw}
             new_fixed = [f for f in fixed_raw if f.id not in seen_ids and "monday.com" not in (f.raw.get("note") or "") and f.id not in fixed_synced_ids]
             secrets_raw.extend(new_fixed)
@@ -1037,7 +1113,6 @@ def run(
         sys.exit(1)
 
     print("\n=== Summary ===")
-    ignored_repos = get_ignored_repos(filters)
     sast_filtered, sast_breakdown = filter_findings(sast_raw, "sast", filters)
     sast = [f for f in sast_filtered if f.repo not in ignored_repos]
     sca_filtered, sca_breakdown = filter_findings(sca_raw, "sca", filters)
@@ -1056,19 +1131,27 @@ def run(
 
     if dry_run:
         print("\n[DRY RUN] New finding IDs by type (would be synced):")
-        total_new = 0
+        total_new_items = 0
+        total_new_findings_dry = 0
         for board_type in ("SAST", "SCA", "Secrets"):
             type_findings = findings_by_type.get(board_type, [])
             already_synced = synced_finding_ids(state, board_type)
             new_findings = [f for f in type_findings if f.id not in already_synced]
             deduped = len(type_findings) - len(new_findings)
-            total_new += len(new_findings)
             if not type_findings:
                 continue
-            print(f"  {board_type}: {len(new_findings)} new ({deduped} already in state.json)")
-            for fid in (f.id for f in new_findings):
-                print(f"    {fid}")
-        print(f"\nTotal new: {total_new}. No state changes, no monday items created, no Semgrep triage updates.")
+            groups = group_findings(new_findings, board_type)
+            capped_note = ""
+            if limit is not None and len(groups) > limit:
+                capped_note = f", capped to {limit} by --limit"
+                groups = groups[:limit]
+            capped_findings = [f for g in groups for f in g.members]
+            total_new_items += len(groups)
+            total_new_findings_dry += len(capped_findings)
+            print(f"  {board_type}: {len(groups)} items / {len(capped_findings)} findings ({deduped} already in state.json{capped_note})")
+            for f in capped_findings:
+                print(f"    {f.id}")
+        print(f"\nTotal new: {total_new_items} items ({total_new_findings_dry} findings). No state changes, no monday items created, no Semgrep triage updates.")
         return
 
     # --- Fetch column maps (one per board, only if that board has new findings) ---
@@ -1117,6 +1200,9 @@ def run(
         grouped_count = len(new) - len(groups)
         if grouped_count > 0:
             print(f"  [{board_type}] {len(new)} findings → {len(groups)} items ({grouped_count} grouped)")
+        if limit is not None and len(groups) > limit:
+            print(f"  [{board_type}] --limit {limit}: capping {len(groups)} items to {limit}")
+            groups = groups[:limit]
 
         for group in groups:
             finding = group.representative
@@ -1444,7 +1530,10 @@ def mark_fixed(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Sync Semgrep findings to monday.com")
     _VALID_TYPES = {"sast": "SAST", "sca": "SCA", "secrets": "Secrets"}
-    parser.add_argument("--limit", type=int, default=None, metavar="N", help="Max findings per type")
+    parser.add_argument("--limit", type=int, default=None, metavar="N",
+                        help="Max monday items to create per board type this run (applied after filtering + grouping)")
+    parser.add_argument("--fetch-limit", type=int, default=None, metavar="N",
+                        help="Max findings to fetch per type from Semgrep (default: 10000). Increase if client-side filters drop most findings.")
     parser.add_argument("--filters", default=None, metavar="PATH", help="Path to filters YAML file (default: filters.yaml if it exists)")
     parser.add_argument("--no-filters", action="store_true", help="Bypass filtering even if filters.yaml exists")
     parser.add_argument("--type", default=None, metavar="TYPES",
@@ -1478,9 +1567,9 @@ if __name__ == "__main__":
         env_path = os.getenv("SEMGREP_FILTERS_FILE")
         resolved_filters_path = Path(env_path) if env_path else DEFAULT_FILTERS_FILE
 
-    run(limit=args.limit, filters_path=resolved_filters_path, types=resolved_types,
-        set_triage_reviewing=args.set_triage_reviewing, dry_run=args.dry_run,
-        no_dedup=args.no_dedup)
+    run(limit=args.limit, fetch_limit=args.fetch_limit, filters_path=resolved_filters_path,
+        types=resolved_types, set_triage_reviewing=args.set_triage_reviewing,
+        dry_run=args.dry_run, no_dedup=args.no_dedup)
     if args.mark_fixed:
         fixed_since_iso: str | None = None
         if args.fixed_since_days is not None:

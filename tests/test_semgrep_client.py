@@ -58,11 +58,11 @@ def _v2_issue_wrapper(raw: dict) -> dict:
 
 def test_fetch_sast_single_page(httpx_mock):
     httpx_mock.add_response(
-        url=f"{FINDINGS_URL}?page=0&page_size=100&status=open&issue_type=sast",
+        url=f"{FINDINGS_URL}?page=0&page_size=3000&status=open&issue_type=sast",
         json={"findings": [_finding_raw("1")], "total": 1},
     )
     httpx_mock.add_response(
-        url=f"{FINDINGS_URL}?page=1&page_size=100&status=open&issue_type=sast",
+        url=f"{FINDINGS_URL}?page=1&page_size=3000&status=open&issue_type=sast",
         json={"findings": [], "total": 1},
     )
 
@@ -76,15 +76,15 @@ def test_fetch_sast_single_page(httpx_mock):
 def test_fetch_sast_pagination(httpx_mock):
     """Follows offset pages until an empty batch is returned."""
     httpx_mock.add_response(
-        url=f"{FINDINGS_URL}?page=0&page_size=100&status=open&issue_type=sast",
+        url=f"{FINDINGS_URL}?page=0&page_size=3000&status=open&issue_type=sast",
         json={"findings": [_finding_raw("1"), _finding_raw("2")], "total": 3},
     )
     httpx_mock.add_response(
-        url=f"{FINDINGS_URL}?page=1&page_size=100&status=open&issue_type=sast",
+        url=f"{FINDINGS_URL}?page=1&page_size=3000&status=open&issue_type=sast",
         json={"findings": [_finding_raw("3")], "total": 3},
     )
     httpx_mock.add_response(
-        url=f"{FINDINGS_URL}?page=2&page_size=100&status=open&issue_type=sast",
+        url=f"{FINDINGS_URL}?page=2&page_size=3000&status=open&issue_type=sast",
         json={"findings": [], "total": 3},
     )
 
@@ -96,11 +96,11 @@ def test_fetch_sast_pagination(httpx_mock):
 def test_fetch_sca_passes_scan_type(httpx_mock):
     """issue_type=sca must be sent and findings labelled SCA."""
     httpx_mock.add_response(
-        url=f"{FINDINGS_URL}?page=0&page_size=100&status=open&issue_type=sca",
+        url=f"{FINDINGS_URL}?page=0&page_size=3000&status=open&issue_type=sca",
         json={"findings": [_finding_raw("10")], "total": 1},
     )
     httpx_mock.add_response(
-        url=f"{FINDINGS_URL}?page=1&page_size=100&status=open&issue_type=sca",
+        url=f"{FINDINGS_URL}?page=1&page_size=3000&status=open&issue_type=sca",
         json={"findings": [], "total": 1},
     )
 
@@ -166,7 +166,7 @@ def test_fetch_secrets_stops_on_empty_results(httpx_mock):
 
 def test_auth_header_sent(httpx_mock):
     httpx_mock.add_response(
-        url=f"{FINDINGS_URL}?page=0&page_size=100&status=open&issue_type=sast",
+        url=f"{FINDINGS_URL}?page=0&page_size=3000&status=open&issue_type=sast",
         json={"findings": [], "total": 0},
     )
 
@@ -182,7 +182,7 @@ def test_auth_header_sent(httpx_mock):
 
 def test_http_error_raises(httpx_mock):
     httpx_mock.add_response(
-        url=f"{FINDINGS_URL}?page=0&page_size=100&status=open&issue_type=sast",
+        url=f"{FINDINGS_URL}?page=0&page_size=3000&status=open&issue_type=sast",
         status_code=403,
         text="Forbidden",
     )

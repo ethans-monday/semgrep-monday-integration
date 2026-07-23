@@ -171,28 +171,34 @@ class SemgrepClient:
         except SemgrepAPIError:
             return None
 
-    def fetch_findings(
+    def iter_findings_pages(
         self,
         issue_type: str,
         max_findings: int = 10_000,
         extra_params: dict | None = None,
-    ) -> list[Finding]:
-        """Fetch SAST or SCA findings using offset pagination.
+        page_size_hint: int | None = None,
+    ):
+        """Yield pages of parsed Finding objects. Caller controls when to stop.
+
+        Semgrep's v1 API requires ``100 <= page_size <= 3000``; the loop clamps.
 
         Args:
-            issue_type: ``"sast"`` or ``"sca"``
-            max_findings: Stop after collecting this many findings.
-            extra_params: Additional query params (e.g. filter pushdowns). Pagination
-                          params ``page`` and ``page_size`` always take precedence.
+            issue_type: ``"sast"``, ``"ai_sast"``, or ``"sca"``.
+            max_findings: Safety cap — never fetches more than this many total.
+            extra_params: Additional query params. Pagination params
+                          ``page`` and ``page_size`` always take precedence.
+            page_size_hint: Suggested page size (clamped to [100, 3000]).
+                            None = use max (3000).
         """
         url = f"{SEMGREP_BASE}/deployments/{self._slug}/findings"
         label = "SCA" if issue_type == "sca" else "SAST"
-        results: list[Finding] = []
+        fetched = 0
         page = 0
 
-        while len(results) < max_findings:
-            remaining = max_findings - len(results)
-            page_size = min(100, remaining)
+        while fetched < max_findings:
+            remaining = max_findings - fetched
+            hint = page_size_hint if page_size_hint is not None else remaining
+            page_size = min(max(100, hint), 3000)
             params: dict = {"status": "open", "issue_type": issue_type}
             if extra_params:
                 for k, v in extra_params.items():
@@ -203,10 +209,24 @@ class SemgrepClient:
             data = self._get(url, params)
             batch = data.get("findings", [])
             if not batch:
-                break
-            results.extend(self._parse_finding(f, label) for f in batch)
+                return
+            parsed = [self._parse_finding(f, label) for f in batch]
+            yield parsed
+            fetched += len(parsed)
             page += 1
 
+    def fetch_findings(
+        self,
+        issue_type: str,
+        max_findings: int = 10_000,
+        extra_params: dict | None = None,
+    ) -> list[Finding]:
+        """Fetch SAST/SCA findings; returns full list. Thin wrapper over ``iter_findings_pages``."""
+        results: list[Finding] = []
+        for batch in self.iter_findings_pages(issue_type, max_findings, extra_params):
+            results.extend(batch)
+            if len(results) >= max_findings:
+                break
         return results[:max_findings]
 
     _V2_ISSUE_TYPE_MAP = {
