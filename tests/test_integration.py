@@ -117,6 +117,10 @@ def _add_semgrep_pages(httpx_mock, issue_type, findings):
     httpx_mock.add_response(url=url_re, json={"findings": findings})
     if findings:
         httpx_mock.add_response(url=url_re, json={"findings": []})
+    # Always mock the ai_sast companion call when registering sast pages
+    if issue_type == "sast":
+        ai_url_re = re.compile(rf"^{re.escape(SEMGREP_FINDINGS_URL)}\?.*issue_type=ai_sast")
+        httpx_mock.add_response(url=ai_url_re, json={"findings": []})
 
 
 def _add_secrets(httpx_mock, secrets, fixed_secrets=None):

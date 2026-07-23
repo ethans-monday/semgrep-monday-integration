@@ -95,8 +95,8 @@ def _mock_clients(sast=None, sca=None, secrets=None):
     """Return (mock_semgrep, {board_type: mock_monday}) with sensible defaults."""
     semgrep = MagicMock()
     semgrep.fetch_findings.side_effect = lambda issue_type, **kw: (
-        sast if issue_type == "sast" else sca
-    ) or []
+        (sast or []) if issue_type in ("sast", "ai_sast") else (sca or [])
+    )
     semgrep.fetch_secrets.return_value = secrets or []
 
     monday_mocks = {}

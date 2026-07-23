@@ -11,7 +11,7 @@ Semgrep Cloud API  -->  sync.py  -->  monday.com GraphQL API
 
 ## What Gets Synced
 
-**SAST board (24 columns)** -- AI triage verdict, CWE, OWASP, vulnerability classes, AI guidance, autofix availability, component risk, rule explanation, project tags, Semgrep deep-link, and more.
+**SAST board (24 columns)** -- Covers both standard SAST (`issue_type=sast`) and AI-powered SAST (`issue_type=ai_sast`) findings, merged into the same board. AI triage verdict, CWE, OWASP, vulnerability classes, AI guidance, autofix availability, component risk, rule explanation, project tags, Semgrep deep-link, and more.
 
 **SCA board (24 columns)** -- CVE, reachability status, EPSS score/percentile, vulnerable package + version, ecosystem, transitivity, fix recommendations, malicious package flag, project tags, Semgrep deep-link.
 
@@ -207,6 +207,7 @@ ignore_repos:
 | `repo` | ✓ | ✓ | ✓ |
 | `rule` | ✓ | | |
 | `ai_verdict` | ✓ (true_positive, false_positive, not_analyzed¹) | | |
+| `file_risk_level` | ✓ (high, low, unknown²) | | |
 | `status` | ✓ (open/fixed/ignored/reviewing/fixing/provisionally_ignored) | ✓ | ✓ scalar (ISSUE_TAB_OPEN/REVIEWING/IGNORED/CLOSED/FIXING) |
 | `reachability` | | ✓ | |
 | `transitivity` | | ✓ | |
@@ -217,6 +218,8 @@ ignore_repos:
 | `exclude_historical` | | | ✓ ([true])³ |
 
 ¹ `not_analyzed` (and any list that includes it) is applied client-side after fetching — the Semgrep v1 API has no equivalent param for findings where the AI verdict field is absent.
+
+² `file_risk_level` is always applied client-side — the Semgrep v1 API has no server-side param for it. Maps to `assistant.component.risk`: `high` (user_auth/payments/pii/infra etc.), `low` (tests/build scripts/generated code etc.), `unknown` (unclassified files, `component.risk = "neutral"`). Findings are downloaded and filtered after fetch.
 
 ² `malicious: [true]` triggers a second SCA query with only `is_malicious=true` — no other SCA filters (severity, reachability, etc.) are applied to it. Results are merged with the primary SCA fetch and deduplicated.
 

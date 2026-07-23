@@ -999,6 +999,11 @@ def run(
         if "SAST" in active_types:
             print("\n=== Fetching SAST findings from Semgrep ===")
             sast_raw = semgrep.fetch_findings("sast", extra_params={**to_query_params("sast", filters), **dedup_params}, **fetch_kwargs)
+            print("\n=== Fetching AI SAST findings from Semgrep ===")
+            ai_sast_raw = semgrep.fetch_findings("ai_sast", extra_params={**to_query_params("sast", filters), **dedup_params}, **fetch_kwargs)
+            seen_ids = {f.id for f in sast_raw}
+            sast_raw.extend(f for f in ai_sast_raw if f.id not in seen_ids)
+            print(f"  AI SAST: {len(ai_sast_raw)} fetched, {len(sast_raw) - len(seen_ids)} new (merged into SAST)")
         if "SCA" in active_types:
             print("\n=== Fetching SCA findings from Semgrep ===")
             sca_raw = semgrep.fetch_findings("sca", extra_params={**to_query_params("sca", filters), **dedup_params}, **fetch_kwargs)

@@ -186,7 +186,7 @@ class SemgrepClient:
                           params ``page`` and ``page_size`` always take precedence.
         """
         url = f"{SEMGREP_BASE}/deployments/{self._slug}/findings"
-        label = "SAST" if issue_type == "sast" else "SCA"
+        label = "SCA" if issue_type == "sca" else "SAST"
         results: list[Finding] = []
         page = 0
 

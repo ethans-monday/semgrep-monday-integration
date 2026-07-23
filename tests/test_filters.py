@@ -268,6 +268,72 @@ def test_filter_findings_not_applicable_to_sca():
 
 
 # ---------------------------------------------------------------------------
+# filter_findings — client-side file_risk_level filtering
+# ---------------------------------------------------------------------------
+
+def _sast_finding_risk(fid: str, risk: str | None) -> Finding:
+    component = {"tag": "none", "risk": risk} if risk else {}
+    raw = _finding_raw(fid)
+    raw["assistant"] = {"component": component}
+    return Finding(id=fid, rule_name="rule", severity="HIGH", file_path="f.py",
+                   line=1, repo="r", finding_type="SAST", raw=raw)
+
+
+def test_filter_findings_file_risk_high_only():
+    findings = [
+        _sast_finding_risk("1", "high"),
+        _sast_finding_risk("2", "low"),
+        _sast_finding_risk("3", "neutral"),
+        _sast_finding_risk("4", None),
+    ]
+    filters = {"sast": {"file_risk_level": ["high"]}}
+    result = filter_findings(findings, "sast", filters)
+    assert [f.id for f in result] == ["1"]
+
+
+def test_filter_findings_file_risk_unknown_matches_neutral_and_absent():
+    findings = [
+        _sast_finding_risk("1", "high"),
+        _sast_finding_risk("2", "neutral"),
+        _sast_finding_risk("3", None),
+    ]
+    filters = {"sast": {"file_risk_level": ["unknown"]}}
+    result = filter_findings(findings, "sast", filters)
+    assert [f.id for f in result] == ["2", "3"]
+
+
+def test_filter_findings_file_risk_high_and_unknown():
+    findings = [
+        _sast_finding_risk("1", "high"),
+        _sast_finding_risk("2", "low"),
+        _sast_finding_risk("3", "neutral"),
+    ]
+    filters = {"sast": {"file_risk_level": ["high", "unknown"]}}
+    result = filter_findings(findings, "sast", filters)
+    assert [f.id for f in result] == ["1", "3"]
+
+
+def test_filter_findings_file_risk_not_sent_to_api():
+    """file_risk_level must not appear in Semgrep API query params."""
+    filters = {"sast": {"file_risk_level": ["high"]}}
+    params = to_query_params("sast", filters)
+    assert "file_risk_level" not in params
+    assert "_file_risk_level" not in params
+
+
+def test_load_filters_file_risk_level_invalid_value(tmp_path):
+    path = _write_yaml(tmp_path, "sast:\n  file_risk_level: [extreme]\n")
+    with pytest.raises(ValueError, match="file_risk_level"):
+        load_filters(path)
+
+
+def test_load_filters_file_risk_level_valid(tmp_path):
+    path = _write_yaml(tmp_path, "sast:\n  file_risk_level: [high, unknown]\n")
+    result = load_filters(path)
+    assert result["sast"]["file_risk_level"] == ["high", "unknown"]
+
+
+# ---------------------------------------------------------------------------
 # SemgrepClient.fetch_findings — extra_params passthrough
 # ---------------------------------------------------------------------------
 

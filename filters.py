@@ -7,6 +7,8 @@
 #     (confirmed: finding 784612867 returns assistant: {} with no autotriage_verdict field).
 #     The Semgrep API autotriage_verdict param only accepts true_positive / false_positive —
 #     there is no server-side way to filter for "not analyzed". Requires client-side post-filter.
+#   - file_risk_level: maps to raw.assistant.component.risk (high/low/neutral).
+#     No server-side param exists — silently ignored by v1 API. Client-side post-filter only.
 
 from pathlib import Path
 
@@ -24,6 +26,7 @@ ALLOWED_FILTERS: dict[str, dict[str, str]] = {
         "rule": "rules",                    # Array of strings: rule IDs
         "ai_verdict": "autotriage_verdict", # Scalar string: true_positive, false_positive
         "status": "status",                # Array: open, fixed, ignored, reviewing, fixing, provisionally_ignored
+        "file_risk_level": "_file_risk_level",  # Client-side only: high, low, unknown
     },
     "sca": {
         "severity": "severities",           # Array of strings: low, medium, high, critical
@@ -125,7 +128,17 @@ def load_filters(path: Path | None) -> dict:
                     raise ValueError(
                         f"Filter '{board_type}.exclude_historical' must be [true], got {values}."
                     )
-            result[board_type][key] = [str(v) for v in values]
+            if key == "file_risk_level":
+                allowed_risk = {"high", "low", "unknown"}
+                bad = [v for v in values if str(v).lower() not in allowed_risk]
+                if bad:
+                    raise ValueError(
+                        f"Filter 'sast.file_risk_level' values must be in {sorted(allowed_risk)}, got {bad}."
+                    )
+            if key == "file_risk_level":
+                result[board_type][key] = [str(v).lower() for v in values]
+            else:
+                result[board_type][key] = [str(v) for v in values]
 
     return result
 
@@ -152,7 +165,7 @@ def to_query_params(board_type: str, filters: dict) -> dict:
     for key, values in block.items():
         api_param = param_map[key]
 
-        if key == "malicious":
+        if key in ("malicious", "file_risk_level"):
             continue
 
         if key == "ai_verdict":
@@ -218,10 +231,33 @@ def _get_ai_verdict(finding) -> str:
     return verdict if verdict else "not_analyzed"
 
 
+# Maps user-facing file_risk_level values to assistant.component.risk API values.
+# "unknown" covers both absent component data and the explicit "neutral" risk tag.
+_FILE_RISK_API_VALUES: dict[str, set[str]] = {
+    "high": {"high"},
+    "low": {"low"},
+    "unknown": {"neutral", "unknown", ""},
+}
+
+
+def _get_file_risk_level(finding) -> str:
+    """Return the file risk level for a SAST finding: 'high', 'low', or 'unknown'."""
+    assistant = finding.raw.get("assistant") or {}
+    risk = (assistant.get("component") or {}).get("risk") or ""
+    if risk == "high":
+        return "high"
+    if risk == "low":
+        return "low"
+    return "unknown"
+
+
 def filter_findings(findings: list, board_type: str, filters: dict) -> list:
     """Apply client-side filters that cannot be pushed server-side to the Semgrep API.
 
-    Currently handles ai_verdict when the list contains not_analyzed or multiple values.
+    Handles:
+      - ai_verdict when the list contains not_analyzed or multiple values (SAST)
+      - file_risk_level: high / low / unknown, mapped from assistant.component.risk (SAST)
+
     Returns the input list unchanged when no client-side filtering is needed.
     """
     block = filters.get(board_type, {})
@@ -230,11 +266,17 @@ def filter_findings(findings: list, board_type: str, filters: dict) -> list:
 
     result = findings
 
-    ai_verdict_values = block.get("ai_verdict")
-    if ai_verdict_values and board_type == "sast":
-        needs_client = "not_analyzed" in ai_verdict_values or len(ai_verdict_values) > 1
-        if needs_client:
-            verdict_set = set(ai_verdict_values)
-            result = [f for f in result if _get_ai_verdict(f) in verdict_set]
+    if board_type == "sast":
+        ai_verdict_values = block.get("ai_verdict")
+        if ai_verdict_values:
+            needs_client = "not_analyzed" in ai_verdict_values or len(ai_verdict_values) > 1
+            if needs_client:
+                verdict_set = set(ai_verdict_values)
+                result = [f for f in result if _get_ai_verdict(f) in verdict_set]
+
+        file_risk_values = block.get("file_risk_level")
+        if file_risk_values:
+            wanted = set(file_risk_values)
+            result = [f for f in result if _get_file_risk_level(f) in wanted]
 
     return result
