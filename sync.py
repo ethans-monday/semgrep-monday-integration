@@ -1161,12 +1161,6 @@ def run(
 # Mark fixed
 # ---------------------------------------------------------------------------
 
-def _project_primary_branch(project: dict | None) -> str:
-    """Return the project's primary branch, falling back to default_branch."""
-    if not project:
-        return ""
-    return project.get("primary_branch") or project.get("default_branch") or ""
-
 
 def _backfill_repos_from_monday(
     state: dict, board_type: str, client: MondayClient,

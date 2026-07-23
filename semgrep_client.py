@@ -211,11 +211,12 @@ class SemgrepClient:
 
     _V2_ISSUE_TYPE_MAP = {
         "sast": "ISSUE_TYPE_SAST",
+        "ai_sast": "ISSUE_TYPE_AI_SAST",
         "sca": "ISSUE_TYPE_SCA",
         "secrets": "ISSUE_TYPE_SECRETS",
     }
 
-    _V2_FINDING_TYPE_MAP = {"sast": "SAST", "sca": "SCA", "secrets": "Secrets"}
+    _V2_FINDING_TYPE_MAP = {"sast": "SAST", "ai_sast": "SAST", "sca": "SCA", "secrets": "Secrets"}
 
     def _fetch_v2_issues(
         self,
@@ -363,7 +364,12 @@ class SemgrepClient:
         if since:
             filter_params["timeFilter"] = "TIME_FILTER_FIXED_AT"
             filter_params["since"] = since
-        return self._fetch_v2_issues(issue_type, max_findings, filter_params)
+        results = self._fetch_v2_issues(issue_type, max_findings, filter_params)
+        if issue_type == "sast":
+            ai_results = self._fetch_v2_issues("ai_sast", max_findings, filter_params)
+            seen = {f.id for f in results}
+            results.extend(f for f in ai_results if f.id not in seen)
+        return results
 
     def triage_findings(
         self,
