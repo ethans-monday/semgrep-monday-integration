@@ -251,20 +251,22 @@ def _get_file_risk_level(finding) -> str:
     return "unknown"
 
 
-def filter_findings(findings: list, board_type: str, filters: dict) -> list:
+def filter_findings(findings: list, board_type: str, filters: dict) -> tuple[list, list[str]]:
     """Apply client-side filters that cannot be pushed server-side to the Semgrep API.
 
     Handles:
       - ai_verdict when the list contains not_analyzed or multiple values (SAST)
       - file_risk_level: high / low / unknown, mapped from assistant.component.risk (SAST)
 
-    Returns the input list unchanged when no client-side filtering is needed.
+    Returns (filtered_list, breakdown) where breakdown is a list of strings like
+    ["150 after ai_verdict", "100 after file_risk_level"] for each filter that dropped findings.
     """
     block = filters.get(board_type, {})
     if not block:
-        return findings
+        return findings, []
 
     result = findings
+    breakdown: list[str] = []
 
     if board_type == "sast":
         ai_verdict_values = block.get("ai_verdict")
@@ -273,10 +275,12 @@ def filter_findings(findings: list, board_type: str, filters: dict) -> list:
             if needs_client:
                 verdict_set = set(ai_verdict_values)
                 result = [f for f in result if _get_ai_verdict(f) in verdict_set]
+                breakdown.append(f"{len(result)} after ai_verdict")
 
         file_risk_values = block.get("file_risk_level")
         if file_risk_values:
             wanted = set(file_risk_values)
             result = [f for f in result if _get_file_risk_level(f) in wanted]
+            breakdown.append(f"{len(result)} after file_risk_level")
 
-    return result
+    return result, breakdown

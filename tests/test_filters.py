@@ -229,23 +229,26 @@ def _sast_finding(fid: str, verdict: str | None) -> Finding:
 
 def test_filter_findings_no_filters():
     findings = [_sast_finding("1", "true_positive"), _sast_finding("2", None)]
-    assert filter_findings(findings, "sast", {}) == findings
+    result, breakdown = filter_findings(findings, "sast", {})
+    assert result == findings
+    assert breakdown == []
 
 
 def test_filter_findings_single_server_side_value_no_client_filter():
     """Single true_positive — pushed server-side, filter_findings is a no-op."""
     findings = [_sast_finding("1", "true_positive"), _sast_finding("2", None)]
     filters = {"sast": {"ai_verdict": ["true_positive"]}}
-    # server-side already filtered; filter_findings should not further reduce
-    result = filter_findings(findings, "sast", filters)
+    result, breakdown = filter_findings(findings, "sast", filters)
     assert result == findings
+    assert breakdown == []
 
 
 def test_filter_findings_not_analyzed_only():
     findings = [_sast_finding("1", "true_positive"), _sast_finding("2", None)]
     filters = {"sast": {"ai_verdict": ["not_analyzed"]}}
-    result = filter_findings(findings, "sast", filters)
+    result, breakdown = filter_findings(findings, "sast", filters)
     assert [f.id for f in result] == ["2"]
+    assert breakdown == ["1 after ai_verdict"]
 
 
 def test_filter_findings_true_positive_and_not_analyzed():
@@ -255,16 +258,18 @@ def test_filter_findings_true_positive_and_not_analyzed():
         _sast_finding("3", None),
     ]
     filters = {"sast": {"ai_verdict": ["true_positive", "not_analyzed"]}}
-    result = filter_findings(findings, "sast", filters)
+    result, breakdown = filter_findings(findings, "sast", filters)
     assert [f.id for f in result] == ["1", "3"]
+    assert breakdown == ["2 after ai_verdict"]
 
 
 def test_filter_findings_not_applicable_to_sca():
     """ai_verdict client filter only applies to sast board type."""
     findings = [_sast_finding("1", "true_positive"), _sast_finding("2", None)]
     filters = {"sca": {"ai_verdict": ["not_analyzed"]}}
-    result = filter_findings(findings, "sca", filters)
+    result, breakdown = filter_findings(findings, "sca", filters)
     assert result == findings
+    assert breakdown == []
 
 
 # ---------------------------------------------------------------------------
@@ -287,8 +292,9 @@ def test_filter_findings_file_risk_high_only():
         _sast_finding_risk("4", None),
     ]
     filters = {"sast": {"file_risk_level": ["high"]}}
-    result = filter_findings(findings, "sast", filters)
+    result, breakdown = filter_findings(findings, "sast", filters)
     assert [f.id for f in result] == ["1"]
+    assert breakdown == ["1 after file_risk_level"]
 
 
 def test_filter_findings_file_risk_unknown_matches_neutral_and_absent():
@@ -298,8 +304,9 @@ def test_filter_findings_file_risk_unknown_matches_neutral_and_absent():
         _sast_finding_risk("3", None),
     ]
     filters = {"sast": {"file_risk_level": ["unknown"]}}
-    result = filter_findings(findings, "sast", filters)
+    result, breakdown = filter_findings(findings, "sast", filters)
     assert [f.id for f in result] == ["2", "3"]
+    assert breakdown == ["2 after file_risk_level"]
 
 
 def test_filter_findings_file_risk_high_and_unknown():
@@ -309,8 +316,9 @@ def test_filter_findings_file_risk_high_and_unknown():
         _sast_finding_risk("3", "neutral"),
     ]
     filters = {"sast": {"file_risk_level": ["high", "unknown"]}}
-    result = filter_findings(findings, "sast", filters)
+    result, breakdown = filter_findings(findings, "sast", filters)
     assert [f.id for f in result] == ["1", "3"]
+    assert breakdown == ["2 after file_risk_level"]
 
 
 def test_filter_findings_file_risk_not_sent_to_api():

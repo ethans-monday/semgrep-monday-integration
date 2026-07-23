@@ -928,14 +928,17 @@ BOARD_CONFIG = {
 # Main
 # ---------------------------------------------------------------------------
 
-def _filter_log(board_type: str, fetched: int, kept: int, filters: dict) -> str:
+def _filter_log(board_type: str, fetched: int, kept: int, filters: dict, breakdown: list[str] | None = None) -> str:
     block = filters.get(board_type, {})
     if not block:
         return f"{board_type.upper()}: {fetched} fetched (no filter)"
     parts = ", ".join(f"{k}=[{','.join(v)}]" for k, v in block.items())
     msg = f"{board_type.upper()}: {fetched} fetched (filters: {parts})"
     if kept != fetched:
-        msg += f" → {kept} after client-side filter"
+        if breakdown:
+            msg += " → " + " → ".join(breakdown)
+        else:
+            msg += f" → {kept} after client-side filter"
     return msg
 
 
@@ -1004,7 +1007,7 @@ def run(
             ai_sast_raw = semgrep.fetch_findings("ai_sast", extra_params={**to_query_params("sast", filters), **dedup_params}, **fetch_kwargs)
             seen_ids = {f.id for f in sast_raw}
             sast_raw.extend(f for f in ai_sast_raw if f.id not in seen_ids)
-            print(f"  AI SAST: {len(ai_sast_raw)} fetched, {len(sast_raw) - len(seen_ids)} new (merged into SAST)")
+            print(f"  AI SAST: {len(ai_sast_raw)} fetched, {len(sast_raw) - len(seen_ids)} merged (after dedup against SAST)")
         if "SCA" in active_types:
             print("\n=== Fetching SCA findings from Semgrep ===")
             sca_raw = semgrep.fetch_findings("sca", extra_params={**to_query_params("sca", filters), **dedup_params}, **fetch_kwargs)
@@ -1035,15 +1038,17 @@ def run(
 
     print("\n=== Summary ===")
     ignored_repos = get_ignored_repos(filters)
-    sast = [f for f in filter_findings(sast_raw, "sast", filters) if f.repo not in ignored_repos]
-    sca = [f for f in filter_findings(sca_raw, "sca", filters) if f.repo not in ignored_repos]
+    sast_filtered, sast_breakdown = filter_findings(sast_raw, "sast", filters)
+    sast = [f for f in sast_filtered if f.repo not in ignored_repos]
+    sca_filtered, sca_breakdown = filter_findings(sca_raw, "sca", filters)
+    sca = [f for f in sca_filtered if f.repo not in ignored_repos]
     secrets = [f for f in secrets_raw if f.repo not in ignored_repos]
 
     findings_by_type = {"SAST": sast, "SCA": sca, "Secrets": secrets}
     if "SAST" in active_types:
-        print(f"  {_filter_log('sast', len(sast_raw), len(sast), filters)}")
+        print(f"  {_filter_log('sast', len(sast_raw), len(sast), filters, sast_breakdown)}")
     if "SCA" in active_types:
-        print(f"  {_filter_log('sca', len(sca_raw), len(sca), filters)}")
+        print(f"  {_filter_log('sca', len(sca_raw), len(sca), filters, sca_breakdown)}")
     if "Secrets" in active_types:
         print(f"  {_filter_log('secrets', len(secrets_raw), len(secrets), filters)}")
     total = sum(len(v) for v in findings_by_type.values())
