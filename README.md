@@ -11,7 +11,7 @@ Semgrep Cloud API  -->  sync.py  -->  monday.com GraphQL API
 
 ## What Gets Synced
 
-**SAST board (24 columns)** -- AI triage verdict, CWE, OWASP, vulnerability classes, AI guidance, autofix availability, component risk, rule explanation, project tags, Semgrep deep-link, and more.
+**SAST board (24 columns)** -- Covers both standard SAST (`issue_type=sast`) and AI-powered SAST (`issue_type=ai_sast`) findings, merged into the same board. AI triage verdict, CWE, OWASP, vulnerability classes, AI guidance, autofix availability, component risk, rule explanation, project tags, Semgrep deep-link, and more.
 
 **SCA board (24 columns)** -- CVE, reachability status, EPSS score/percentile, vulnerable package + version, ecosystem, transitivity, fix recommendations, malicious package flag, project tags, Semgrep deep-link.
 
@@ -79,6 +79,7 @@ python sync.py                            # sync all open findings
 python sync.py --limit 50                 # sync up to 50 per type (for testing)
 python sync.py --set-triage-reviewing     # also triage findings in Semgrep
 python sync.py --dry-run                  # fetch and print finding IDs, no side effects
+python sync.py --mark-fixed               # after sync, reconcile items: mark Fixed / Not scanned by Semgrep (SAST + SCA)
 ```
 
 ## Configuration
@@ -119,6 +120,29 @@ This provides server-side deduplication for all three types: filtering by `statu
 The monday.com account slug (subdomain) is auto-discovered via the `account { slug }` GraphQL query. If this fails, set `MONDAY_ACCOUNT_SLUG` in `.env`.
 
 Without the flag, triage is skipped and dedup relies entirely on `state.json`.
+
+### Reconcile fixed / not-scanned items (SAST + SCA)
+
+Pass `--mark-fixed` to run a reconciliation pass **after** the normal sync. It updates existing monday items whose state in Semgrep has changed since they were created.
+
+```bash
+python sync.py --mark-fixed                       # sync + reconcile in one invocation
+python sync.py --mark-fixed --dry-run             # preview what would change
+python sync.py --mark-fixed --type sca            # limit reconciliation to SAST or SCA
+python sync.py --mark-fixed --fixed-since-days 7  # only consider findings fixed in the past 7 days
+```
+
+Under the hood, reconciliation uses Semgrep's v2 Issues API to avoid per-repo round-trips:
+
+1. **Bulk `/projects` fetch** — one paginated call. Semgrep excludes archived repos from this list, so absence from it is our "no longer scanned" signal.
+2. **v2 `/issues` fetch** — one paginated call per board type with filter `{aggregateIssueStates: [AGGREGATE_ISSUE_STATE_FIXED], onPrimaryBranch: true}` (plus optional `timeFilter: TIME_FILTER_FIXED_AT` + `since` when `--fixed-since-days N` is set). Returns all fixed findings across all repos in one stream.
+3. **Match + mark:**
+   - Any state.json entry whose repo is **absent from the projects list** → "Triage State" = `Not scanned by Semgrep`, migrated to `not_scanned_state.json`.
+   - Any state.json entry whose `finding_ids` intersect the v2 fixed-on-primary set → "Triage State" = `Fixed`, migrated to `fixed_state.json`.
+
+`state.json` v5 stores the `repo` per item alongside its finding IDs, populated at item creation time. Pre-v5 entries have `repo=""` and are backfilled lazily via monday's "Repo" column the first time `--mark-fixed` runs against them.
+
+Secrets are not handled by `--mark-fixed` — Secrets already has its own fixed-pass baked into the normal sync run.
 
 ### Idempotent syncs
 
@@ -183,6 +207,7 @@ ignore_repos:
 | `repo` | ✓ | ✓ | ✓ |
 | `rule` | ✓ | | |
 | `ai_verdict` | ✓ (true_positive, false_positive, not_analyzed¹) | | |
+| `file_risk_level` | ✓ (high, low, unknown²) | | |
 | `status` | ✓ (open/fixed/ignored/reviewing/fixing/provisionally_ignored) | ✓ | ✓ scalar (ISSUE_TAB_OPEN/REVIEWING/IGNORED/CLOSED/FIXING) |
 | `reachability` | | ✓ | |
 | `transitivity` | | ✓ | |
@@ -193,6 +218,8 @@ ignore_repos:
 | `exclude_historical` | | | ✓ ([true])³ |
 
 ¹ `not_analyzed` (and any list that includes it) is applied client-side after fetching — the Semgrep v1 API has no equivalent param for findings where the AI verdict field is absent.
+
+² `file_risk_level` is always applied client-side — the Semgrep v1 API has no server-side param for it. Maps to `assistant.component.risk`: `high` (user_auth/payments/pii/infra etc.), `low` (tests/build scripts/generated code etc.), `unknown` (unclassified files, `component.risk = "neutral"`). Findings are downloaded and filtered after fetch.
 
 ² `malicious: [true]` triggers a second SCA query with only `is_malicious=true` — no other SCA filters (severity, reachability, etc.) are applied to it. Results are merged with the primary SCA fetch and deduplicated.
 

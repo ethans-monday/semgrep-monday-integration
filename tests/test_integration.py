@@ -117,6 +117,10 @@ def _add_semgrep_pages(httpx_mock, issue_type, findings):
     httpx_mock.add_response(url=url_re, json={"findings": findings})
     if findings:
         httpx_mock.add_response(url=url_re, json={"findings": []})
+    # Always mock the ai_sast companion call when registering sast pages
+    if issue_type == "sast":
+        ai_url_re = re.compile(rf"^{re.escape(SEMGREP_FINDINGS_URL)}\?.*issue_type=ai_sast")
+        httpx_mock.add_response(url=ai_url_re, json={"findings": []})
 
 
 def _add_secrets(httpx_mock, secrets, fixed_secrets=None):
@@ -296,8 +300,8 @@ def test_sca_grouping_creates_single_item(httpx_mock, env_vars, state_file):
     state = json.loads(state_file.read_text())
     assert sync.synced_finding_ids(state, "SCA") == {"201", "202"}
     assert len(state["monday_items_created"]["SCA"]) == 1
-    item_fids = list(state["monday_items_created"]["SCA"].values())[0]
-    assert sorted(item_fids) == ["201", "202"]
+    item_entry = list(state["monday_items_created"]["SCA"].values())[0]
+    assert sorted(item_entry["finding_ids"]) == ["201", "202"]
 
 
 def test_set_triage_reviewing_flag(httpx_mock, env_vars, state_file):

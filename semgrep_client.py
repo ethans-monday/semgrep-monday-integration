@@ -11,6 +11,7 @@ Secrets use the v2 Issues API:
 """
 
 from dataclasses import dataclass
+from urllib.parse import urlencode
 
 import time
 
@@ -52,7 +53,7 @@ class SemgrepClient:
     def _get(self, url: str, params: dict | None = None) -> dict:
         for attempt in range(_MAX_RETRIES):
             try:
-                print(f"  [semgrep] GET {url}" + (f"?{'&'.join(f'{k}={v}' for k, v in params.items())}" if params else ""))
+                print(f"  [semgrep] GET {url}" + (f"?{urlencode(params, doseq=True)}" if params else ""))
                 response = httpx.get(url, headers=self._headers, params=params, timeout=_TIMEOUT)
                 if response.status_code != 200:
                     raise SemgrepAPIError(
@@ -185,7 +186,7 @@ class SemgrepClient:
                           params ``page`` and ``page_size`` always take precedence.
         """
         url = f"{SEMGREP_BASE}/deployments/{self._slug}/findings"
-        label = "SAST" if issue_type == "sast" else "SCA"
+        label = "SCA" if issue_type == "sca" else "SAST"
         results: list[Finding] = []
         page = 0
 
@@ -208,18 +209,33 @@ class SemgrepClient:
 
         return results[:max_findings]
 
-    def fetch_secrets(
+    _V2_ISSUE_TYPE_MAP = {
+        "sast": "ISSUE_TYPE_SAST",
+        "ai_sast": "ISSUE_TYPE_AI_SAST",
+        "sca": "ISSUE_TYPE_SCA",
+        "secrets": "ISSUE_TYPE_SECRETS",
+    }
+
+    _V2_FINDING_TYPE_MAP = {"sast": "SAST", "ai_sast": "SAST", "sca": "SCA", "secrets": "Secrets"}
+
+    def _fetch_v2_issues(
         self,
-        max_findings: int = 10_000,
-        filter_params: dict | None = None,
+        issue_type: str,
+        max_findings: int,
+        filter_params: dict | None,
     ) -> list[Finding]:
-        """Fetch Secrets issues using the v2 Issues API (POST, cursor pagination).
+        """Common v2 /issues loop. Cursor-paginated.
 
         Args:
-            max_findings: Stop after collecting this many findings.
-            filter_params: Filter dict matching the v2 ``filter`` body field.
-                           Pagination fields (``limit``, ``cursor``) are managed internally.
+            issue_type: ``"sast"``, ``"sca"``, or ``"secrets"``.
+            max_findings: Stop after collecting this many.
+            filter_params: dict for the v2 ``filter`` body field.
         """
+        v2_type = self._V2_ISSUE_TYPE_MAP.get(issue_type)
+        if v2_type is None:
+            raise SemgrepAPIError(f"Unknown issue_type '{issue_type}'")
+        finding_type = self._V2_FINDING_TYPE_MAP[issue_type]
+
         if not self._dep_id:
             self._dep_id = self._fetch_deployment_id()
         url = f"{SEMGREP_V2_BASE}/deployments/{self._dep_id}/issues"
@@ -231,7 +247,73 @@ class SemgrepClient:
             page_size = min(100, remaining)
             body: dict = {
                 "deploymentId": self._dep_id,
-                "issueType": "ISSUE_TYPE_SECRETS",
+                "issueType": v2_type,
+                "limit": page_size,
+            }
+            if filter_params:
+                body["filter"] = filter_params
+            if cursor:
+                body["cursor"] = cursor
+
+            data = self._post(url, body)
+            issues = data.get("issues", [])
+            if not issues:
+                break
+
+            for item in issues:
+                issue = item.get("issue") or item
+                results.append(self._parse_v2_issue(issue, finding_type))
+
+            cursor = data.get("cursor", "")
+            if not cursor:
+                break
+
+        return results[:max_findings]
+
+    @staticmethod
+    def _parse_v2_issue(raw: dict, finding_type: str) -> Finding:
+        """Parse a v2 issue (SAST/SCA/Secrets) into a Finding.
+
+        v2 uses camelCase and prefixed severity enums. This is a minimal
+        parser sufficient for mark_fixed matching (id + repo). Full v2
+        parsing lives on the dedicated v2 migration branch.
+        """
+        raw_sev = (raw.get("severity") or "UNKNOWN").upper()
+        if raw_sev.startswith("SEVERITY_"):
+            raw_sev = raw_sev[len("SEVERITY_"):]
+        return Finding(
+            id=str(raw["id"]),
+            rule_name=raw.get("rulePath", ""),
+            severity=raw_sev,
+            file_path=raw.get("filePath", ""),
+            line=raw.get("line", 0),
+            repo=(raw.get("repository") or {}).get("name", ""),
+            finding_type=finding_type,
+            raw=raw,
+        )
+
+    def fetch_secrets(
+        self,
+        max_findings: int = 10_000,
+        filter_params: dict | None = None,
+    ) -> list[Finding]:
+        """Fetch Secrets issues using the v2 Issues API (POST, cursor pagination)."""
+        # Keep the legacy _parse_secret_issue parser for Secrets since it's
+        # exercised by the existing sync path. Only the v2 caller for
+        # SAST/SCA (mark_fixed) uses the generic _parse_v2_issue.
+        v2_type = self._V2_ISSUE_TYPE_MAP["secrets"]
+        if not self._dep_id:
+            self._dep_id = self._fetch_deployment_id()
+        url = f"{SEMGREP_V2_BASE}/deployments/{self._dep_id}/issues"
+        results: list[Finding] = []
+        cursor: str = ""
+
+        while len(results) < max_findings:
+            remaining = max_findings - len(results)
+            page_size = min(100, remaining)
+            body: dict = {
+                "deploymentId": self._dep_id,
+                "issueType": v2_type,
                 "limit": page_size,
             }
             if filter_params:
@@ -253,6 +335,41 @@ class SemgrepClient:
                 break
 
         return results[:max_findings]
+
+    def fetch_fixed_issues_v2(
+        self,
+        issue_type: str,
+        since: str | None = None,
+        max_findings: int = 1_000_000,
+    ) -> list[Finding]:
+        """Fetch fixed issues on the primary branch via the v2 Issues API.
+
+        Server-side filters: aggregateIssueStates = FIXED, onPrimaryBranch = true.
+        Optionally ``since`` (ISO 8601) narrows to findings fixed after that time.
+
+        Args:
+            issue_type: ``"sast"`` or ``"sca"``.
+            since: ISO 8601 timestamp; if set, filters by TIME_FILTER_FIXED_AT >= since.
+            max_findings: Safety cap; defaults to 1M (effectively unbounded).
+
+        Returns:
+            List of Finding objects (id + repo minimally populated).
+        """
+        if issue_type not in ("sast", "sca"):
+            raise SemgrepAPIError(f"fetch_fixed_issues_v2 supports sast/sca; got '{issue_type}'")
+        filter_params: dict = {
+            "aggregateIssueStates": ["AGGREGATE_ISSUE_STATE_FIXED"],
+            "onPrimaryBranch": True,
+        }
+        if since:
+            filter_params["timeFilter"] = "TIME_FILTER_FIXED_AT"
+            filter_params["since"] = since
+        results = self._fetch_v2_issues(issue_type, max_findings, filter_params)
+        if issue_type == "sast":
+            ai_results = self._fetch_v2_issues("ai_sast", max_findings, filter_params)
+            seen = {f.id for f in results}
+            results.extend(f for f in ai_results if f.id not in seen)
+        return results
 
     def triage_findings(
         self,

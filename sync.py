@@ -9,6 +9,7 @@ Usage:
     python sync.py --no-filters                   # skip filtering even if filters.yaml exists
     python sync.py --set-triage-reviewing         # triage synced findings to 'reviewing' in Semgrep
     python sync.py --dry-run                      # fetch and print finding IDs without side effects
+    python sync.py --mark-fixed                   # after sync, reconcile items: mark Fixed / Not scanned by Semgrep (SAST + SCA)
 
 State is persisted in state.json. Re-running is safe — findings already synced
 are skipped (deduplication by Semgrep finding ID).
@@ -31,7 +32,7 @@ from semgrep_client import Finding, SemgrepAPIError, SemgrepClient
 DEFAULT_STATE_FILE = Path(__file__).parent / "state.json"
 DEFAULT_FIXED_SYNCED_FILE = Path(__file__).parent / "fixed_state.json"
 DEFAULT_FILTERS_FILE = Path(__file__).parent / "filters.yaml"
-STATE_VERSION = 4
+STATE_VERSION = 5
 
 
 # ---------------------------------------------------------------------------
@@ -294,26 +295,147 @@ def load_state(path: Path) -> dict:
             else:
                 v4.setdefault(board, {})[mid] = entry.get("finding_ids", [])
         state["monday_items_created"] = v4
+        version = 4
+    # Migrate v4 → v5 (nest each item entry as {"repo": "", "finding_ids": [...]})
+    # repo is left empty; mark_fixed() backfills it lazily via monday's Repo column.
+    if version < 5:
+        v4_items = state.get("monday_items_created", {})
+        v5 = _empty_items()
+        for board, items in v4_items.items():
+            v5.setdefault(board, {})
+            for mid, entry in items.items():
+                v5[board][mid] = _upgrade_item_entry(entry)
+        state["monday_items_created"] = v5
     state["version"] = STATE_VERSION
     for key in _empty_items():
         state["monday_items_created"].setdefault(key, {})
     return state
 
 
-def load_fixed_synced(path: Path) -> set[str]:
+def _upgrade_item_entry(entry) -> dict:
+    """Normalize a per-item state entry to the v5 shape.
+
+    Accepts either a legacy list `[fid, ...]` or an already-v5 dict.
+    """
+    if isinstance(entry, dict):
+        entry.setdefault("repo", "")
+        entry.setdefault("finding_ids", [])
+        entry["finding_ids"] = [str(f) for f in entry["finding_ids"]]
+        return entry
+    return {"repo": "", "finding_ids": [str(f) for f in (entry or [])]}
+
+
+def item_finding_ids(entry) -> list[str]:
+    """Return the finding IDs from a v5 (or legacy) state entry."""
+    if isinstance(entry, dict):
+        return list(entry.get("finding_ids") or [])
+    return list(entry or [])
+
+
+def item_repo(entry) -> str:
+    """Return the repo from a v5 state entry (or empty string for legacy)."""
+    if isinstance(entry, dict):
+        return entry.get("repo") or ""
+    return ""
+
+
+FIXED_STATE_VERSION = 3
+
+
+def _empty_fixed_state() -> dict:
+    return {"version": FIXED_STATE_VERSION, "SECRETS": [], "SAST": {}, "SCA": {}}
+
+
+def load_fixed_state(path: Path) -> dict:
+    """Load fixed_state.json. Auto-migrates older versions on read.
+
+    v1 format: {"version": 1, "SECRETS": [fid, ...]}
+    v2 format: {"version": 2, "SECRETS": [fid, ...],
+                "SAST": {item_id: [fid, ...]}, "SCA": {item_id: [fid, ...]}}
+    v3 format: {"version": 3, "SECRETS": [fid, ...],
+                "SAST": {item_id: {"repo": "...", "finding_ids": [fid, ...]}},
+                "SCA":  {item_id: {"repo": "...", "finding_ids": [fid, ...]}}}
+    """
     if not path.exists():
-        return set()
-    return set(json.loads(path.read_text()).get("SECRETS", []))
+        return _empty_fixed_state()
+    data = json.loads(path.read_text())
+    version = data.get("version", 1)
+    if version < 2:
+        # v1 → v2: preserve SECRETS list; add empty SAST/SCA dicts
+        data = {
+            "version": 2,
+            "SECRETS": data.get("SECRETS", []),
+            "SAST": {},
+            "SCA": {},
+        }
+        version = 2
+    if version < 3:
+        # v2 → v3: nest SAST/SCA entries as {"repo": "", "finding_ids": [...]}
+        for board in ("SAST", "SCA"):
+            board_data = data.get(board, {}) or {}
+            data[board] = {mid: _upgrade_item_entry(v) for mid, v in board_data.items()}
+    data.setdefault("SECRETS", [])
+    data.setdefault("SAST", {})
+    data.setdefault("SCA", {})
+    data["version"] = FIXED_STATE_VERSION
+    return data
 
 
-def save_fixed_synced(ids: set[str], path: Path) -> None:
-    path.write_text(json.dumps({"version": 1, "SECRETS": sorted(ids)}, indent=2))
+def save_fixed_state(fixed_state: dict, path: Path) -> None:
+    # Normalize SECRETS to a sorted list for deterministic output
+    out = {
+        "version": FIXED_STATE_VERSION,
+        "SECRETS": sorted(fixed_state.get("SECRETS", [])),
+        "SAST": fixed_state.get("SAST", {}),
+        "SCA": fixed_state.get("SCA", {}),
+    }
+    path.write_text(json.dumps(out, indent=2))
+
+
+def synced_secrets_ids(fixed_state: dict) -> set[str]:
+    return set(fixed_state.get("SECRETS", []))
+
+
+NOT_SCANNED_STATE_VERSION = 1
+
+
+def _empty_not_scanned_state() -> dict:
+    return {"version": NOT_SCANNED_STATE_VERSION, "SAST": {}, "SCA": {}}
+
+
+def load_not_scanned_state(path: Path) -> dict:
+    """Load not_scanned_state.json.
+
+    Shape mirrors fixed_state.json's SAST/SCA sections:
+        {"version": 1,
+         "SAST": {item_id: {"repo": "...", "finding_ids": [...]}},
+         "SCA":  {item_id: {"repo": "...", "finding_ids": [...]}}}
+    Entries land here when their repo is 404 in Semgrep (archived / deleted /
+    permissions changed).
+    """
+    if not path.exists():
+        return _empty_not_scanned_state()
+    data = json.loads(path.read_text())
+    for board in ("SAST", "SCA"):
+        board_data = data.get(board, {}) or {}
+        data[board] = {mid: _upgrade_item_entry(v) for mid, v in board_data.items()}
+    data["version"] = NOT_SCANNED_STATE_VERSION
+    return data
+
+
+def save_not_scanned_state(data: dict, path: Path) -> None:
+    out = {
+        "version": NOT_SCANNED_STATE_VERSION,
+        "SAST": data.get("SAST", {}),
+        "SCA": data.get("SCA", {}),
+    }
+    path.write_text(json.dumps(out, indent=2))
 
 
 def synced_finding_ids(state: dict, board_type: str) -> set[str]:
     ids: set[str] = set()
-    for fids in state.get("monday_items_created", {}).get(board_type, {}).values():
-        ids.update(fids)
+    for entry in state.get("monday_items_created", {}).get(board_type, {}).values():
+        ids.update(item_finding_ids(entry))
     return ids
 
 
@@ -806,14 +928,17 @@ BOARD_CONFIG = {
 # Main
 # ---------------------------------------------------------------------------
 
-def _filter_log(board_type: str, fetched: int, kept: int, filters: dict) -> str:
+def _filter_log(board_type: str, fetched: int, kept: int, filters: dict, breakdown: list[str] | None = None) -> str:
     block = filters.get(board_type, {})
     if not block:
         return f"{board_type.upper()}: {fetched} fetched (no filter)"
     parts = ", ".join(f"{k}=[{','.join(v)}]" for k, v in block.items())
     msg = f"{board_type.upper()}: {fetched} fetched (filters: {parts})"
     if kept != fetched:
-        msg += f" → {kept} after client-side filter"
+        if breakdown:
+            msg += " → " + " → ".join(breakdown)
+        else:
+            msg += f" → {kept} after client-side filter"
     return msg
 
 
@@ -831,7 +956,8 @@ def run(
     cfg = load_config()
     state = load_state(state_path)
     fixed_synced_path = state_path.parent / "fixed_state.json"
-    fixed_synced_ids: set[str] = load_fixed_synced(fixed_synced_path)
+    fixed_state = load_fixed_state(fixed_synced_path)
+    fixed_synced_ids: set[str] = synced_secrets_ids(fixed_state)
 
     today = str(date.today())
     state.setdefault("daily", {})
@@ -867,19 +993,36 @@ def run(
         account_slug = first_client.get_account_slug()
 
     # --- Fetch findings ---
-    print("Fetching Semgrep findings…")
     fetch_kwargs = {} if limit is None else {"max_findings": limit}
     dedup_params = {} if no_dedup else {"dedup": "true"}
+    sast_raw: list[Finding] = []
+    sca_raw: list[Finding] = []
+    secrets_raw: list[Finding] = []
     try:
-        sast_raw = semgrep.fetch_findings("sast", extra_params={**to_query_params("sast", filters), **dedup_params}, **fetch_kwargs) if "SAST" in active_types else []
-        sca_raw = semgrep.fetch_findings("sca", extra_params={**to_query_params("sca", filters), **dedup_params}, **fetch_kwargs) if "SCA" in active_types else []
-        if "SCA" in active_types and has_malicious_filter(filters):
-            malicious_raw = semgrep.fetch_findings("sca", extra_params={**to_malicious_query_params(), **dedup_params}, **fetch_kwargs)
-            seen_ids = {f.id for f in sca_raw}
-            sca_raw.extend(f for f in malicious_raw if f.id not in seen_ids)
-            print(f"  SCA malicious second-pass: {len(malicious_raw)} fetched, {len(sca_raw) - len(seen_ids)} new")
-        secrets_raw = semgrep.fetch_secrets(filter_params=to_secrets_filter_body(filters), **fetch_kwargs) if "Secrets" in active_types else []
+        if "SAST" in active_types:
+            print("\n=== Fetching SAST findings from Semgrep ===")
+            sast_raw = semgrep.fetch_findings("sast", extra_params={**to_query_params("sast", filters), **dedup_params}, **fetch_kwargs)
+            print(f"  SAST: {len(sast_raw)} fetched")
+            print("\n=== Fetching AI SAST findings from Semgrep ===")
+            ai_sast_raw = semgrep.fetch_findings("ai_sast", extra_params={**to_query_params("sast", filters), **dedup_params}, **fetch_kwargs)
+            seen_ids = {f.id for f in sast_raw}
+            sast_raw.extend(f for f in ai_sast_raw if f.id not in seen_ids)
+            print(f"  AI SAST: {len(ai_sast_raw)} fetched, {len(sast_raw) - len(seen_ids)} merged (after dedup against SAST)")
+        if "SCA" in active_types:
+            print("\n=== Fetching SCA findings from Semgrep ===")
+            sca_raw = semgrep.fetch_findings("sca", extra_params={**to_query_params("sca", filters), **dedup_params}, **fetch_kwargs)
+            print(f"  SCA: {len(sca_raw)} fetched")
+            if has_malicious_filter(filters):
+                print("\n=== Fetching SCA malicious findings (second pass) ===")
+                malicious_raw = semgrep.fetch_findings("sca", extra_params={**to_malicious_query_params(), **dedup_params}, **fetch_kwargs)
+                seen_ids = {f.id for f in sca_raw}
+                sca_raw.extend(f for f in malicious_raw if f.id not in seen_ids)
+                print(f"  SCA malicious second-pass: {len(malicious_raw)} fetched, {len(sca_raw) - len(seen_ids)} new")
         if "Secrets" in active_types:
+            print("\n=== Fetching open Secrets findings from Semgrep ===")
+            secrets_raw = semgrep.fetch_secrets(filter_params=to_secrets_filter_body(filters), **fetch_kwargs)
+            print(f"  Secrets open: {len(secrets_raw)} fetched")
+            print("\n=== Fetching fixed Secrets findings from Semgrep ===")
             fixed_filter = {k: v for k, v in to_secrets_filter_body(filters).items() if k != "tab"}
             fixed_filter["aggregateIssueStates"] = ["AGGREGATE_ISSUE_STATE_FIXED"]
             fixed_raw = semgrep.fetch_secrets(filter_params=fixed_filter, **{k: v for k, v in fetch_kwargs.items() if k != "max_findings"})
@@ -893,32 +1036,39 @@ def run(
         print(f"Semgrep API error: {exc}")
         sys.exit(1)
 
+    print("\n=== Summary ===")
     ignored_repos = get_ignored_repos(filters)
-    sast = [f for f in filter_findings(sast_raw, "sast", filters) if f.repo not in ignored_repos]
-    sca = [f for f in filter_findings(sca_raw, "sca", filters) if f.repo not in ignored_repos]
+    sast_filtered, sast_breakdown = filter_findings(sast_raw, "sast", filters)
+    sast = [f for f in sast_filtered if f.repo not in ignored_repos]
+    sca_filtered, sca_breakdown = filter_findings(sca_raw, "sca", filters)
+    sca = [f for f in sca_filtered if f.repo not in ignored_repos]
     secrets = [f for f in secrets_raw if f.repo not in ignored_repos]
 
     findings_by_type = {"SAST": sast, "SCA": sca, "Secrets": secrets}
     if "SAST" in active_types:
-        print(f"  {_filter_log('sast', len(sast_raw), len(sast), filters)}")
+        print(f"  {_filter_log('sast', len(sast_raw), len(sast), filters, sast_breakdown)}")
     if "SCA" in active_types:
-        print(f"  {_filter_log('sca', len(sca_raw), len(sca), filters)}")
+        print(f"  {_filter_log('sca', len(sca_raw), len(sca), filters, sca_breakdown)}")
     if "Secrets" in active_types:
         print(f"  {_filter_log('secrets', len(secrets_raw), len(secrets), filters)}")
     total = sum(len(v) for v in findings_by_type.values())
     print(f"  Total: {total}")
 
     if dry_run:
-        print("\n[DRY RUN] Finding IDs by type:")
+        print("\n[DRY RUN] New finding IDs by type (would be synced):")
+        total_new = 0
         for board_type in ("SAST", "SCA", "Secrets"):
             type_findings = findings_by_type.get(board_type, [])
+            already_synced = synced_finding_ids(state, board_type)
+            new_findings = [f for f in type_findings if f.id not in already_synced]
+            deduped = len(type_findings) - len(new_findings)
+            total_new += len(new_findings)
             if not type_findings:
                 continue
-            ids = [f.id for f in type_findings]
-            print(f"  {board_type} ({len(ids)}):")
-            for fid in ids:
+            print(f"  {board_type}: {len(new_findings)} new ({deduped} already in state.json)")
+            for fid in (f.id for f in new_findings):
                 print(f"    {fid}")
-        print("\nNo state changes, no monday items created, no Semgrep triage updates.")
+        print(f"\nTotal new: {total_new}. No state changes, no monday items created, no Semgrep triage updates.")
         return
 
     # --- Fetch column maps (one per board, only if that board has new findings) ---
@@ -948,6 +1098,7 @@ def run(
         "Secrets": format_update_body_secrets_group,
     }
 
+    print("\n=== Creating monday.com items ===")
     for board_type in ("SAST", "SCA", "Secrets"):
         type_findings = findings_by_type.get(board_type, [])
         already_synced = synced_finding_ids(state, board_type)
@@ -975,9 +1126,10 @@ def run(
             _set_dropdown_col(col_vals, col_map, "Project Tags", _get_project_tags(finding.repo))
             try:
                 monday_id, _ = board["client"].create_item(item_name, col_vals)
-                state["monday_items_created"][board_type][monday_id] = [
-                    f.id for f in group.members
-                ]
+                state["monday_items_created"][board_type][monday_id] = {
+                    "repo": finding.repo,
+                    "finding_ids": [f.id for f in group.members],
+                }
                 if board_type == "Secrets":
                     for f in group.members:
                         if f.raw.get("aggregateState") == "AGGREGATE_ISSUE_STATE_FIXED":
@@ -1008,8 +1160,285 @@ def run(
                 print(f"  [{board_type}] Failed for {member_ids}: {exc}")
 
     save_state(state, state_path)
-    save_fixed_synced(fixed_synced_ids, fixed_synced_path)
+    fixed_state["SECRETS"] = sorted(fixed_synced_ids)
+    save_fixed_state(fixed_state, fixed_synced_path)
     print(f"\nDone: {created} items created, {total_new_findings} new findings processed.")
+
+
+# ---------------------------------------------------------------------------
+# Mark fixed
+# ---------------------------------------------------------------------------
+
+
+def _backfill_repos_from_monday(
+    state: dict, board_type: str, client: MondayClient,
+) -> int:
+    """Populate empty "repo" fields on v5 state entries via monday's Repo column.
+
+    Returns the count of items successfully backfilled.
+    """
+    entries = state["monday_items_created"].get(board_type, {})
+    need_repo = [iid for iid, e in entries.items() if not item_repo(e)]
+    if not need_repo:
+        return 0
+    col_map = client.get_column_map()
+    repo_col_id = col_map.get("Repo")
+    if not repo_col_id:
+        print(f"  [{board_type}] backfill: 'Repo' column not found — leaving {len(need_repo)} entries without repo")
+        return 0
+    try:
+        items = client.get_items_by_ids(need_repo, [repo_col_id])
+    except Exception as exc:
+        print(f"  [{board_type}] backfill: failed to fetch monday items: {exc}")
+        return 0
+    filled = 0
+    for it in items:
+        mid = str(it["id"])
+        repo_val = ""
+        for cv in it.get("column_values") or []:
+            if cv.get("id") == repo_col_id:
+                repo_val = (cv.get("text") or "").strip()
+                break
+        if repo_val and mid in entries:
+            entries[mid]["repo"] = repo_val
+            filled += 1
+    return filled
+
+
+def mark_fixed(
+    state_path: Path = DEFAULT_STATE_FILE,
+    filters_path: Path | None = DEFAULT_FILTERS_FILE,
+    types: set[str] | None = None,
+    dry_run: bool = False,
+    fixed_since: str | None = None,
+) -> None:
+    """Reconcile monday items with fixed / not-scanned state in Semgrep (v2 API).
+
+    Approach:
+      1. Bulk-fetch `/projects` once. Semgrep's list-projects endpoint
+         excludes archived repos, so absence-from-this-list is our
+         signal for "not scanned anymore."
+      2. Per board_type (SAST/SCA), call the v2 `/issues` endpoint with
+         `aggregateIssueStates=[AGGREGATE_ISSUE_STATE_FIXED]` and
+         `onPrimaryBranch=true`. Optionally add
+         `timeFilter=TIME_FILTER_FIXED_AT` + `since=<fixed_since>` to
+         narrow to recent transitions.
+      3. Intersect the returned finding IDs with each state entry's
+         `finding_ids`; on match, set "Triage State" -> "Fixed" and
+         migrate the entry to `fixed_state.json`.
+      4. For any state.json repo absent from the bulk projects list,
+         mark all its items "Not scanned by Semgrep" and migrate to
+         `not_scanned_state.json`.
+
+    Backfill: pre-v5 entries with `repo=""` are backfilled once via
+    monday's "Repo" column at the start of this pass.
+
+    Only SAST and SCA. Secrets has its own fixed-pass in run().
+    """
+    print("\n\n############################################")
+    print("### Reconciling fixed / not-scanned items ###")
+    print("############################################")
+
+    supported = {"SAST", "SCA"}
+    active_types = (types & supported) if types is not None else supported
+    if not active_types:
+        print("No supported types selected (SAST, SCA). Nothing to do.")
+        return
+
+    cfg = load_config()
+    state = load_state(state_path)
+    fixed_path = state_path.parent / "fixed_state.json"
+    not_scanned_path = state_path.parent / "not_scanned_state.json"
+    fixed_state = load_fixed_state(fixed_path)
+    not_scanned_state = load_not_scanned_state(not_scanned_path)
+
+    filters = load_filters(filters_path)
+    ignored_repos = get_ignored_repos(filters)
+
+    semgrep = SemgrepClient(
+        token=cfg["SEMGREP_APP_TOKEN"],
+        deployment_slug=cfg["SEMGREP_DEPLOYMENT_SLUG"],
+    )
+
+    boards: dict[str, dict] = {}
+    for board_type in active_types:
+        bc = BOARD_CONFIG[board_type]
+        board_id = int(cfg[bc["env_var"]])
+        boards[board_type] = {
+            "client": MondayClient(token=cfg["MONDAY_API_TOKEN"], board_id=board_id),
+            "board_id": board_id,
+        }
+
+    # --- Backfill repo for any pre-v5 state entries that lack it ---
+    need_backfill = any(
+        not item_repo(e)
+        for bt in active_types
+        for e in state["monday_items_created"].get(bt, {}).values()
+    )
+    if need_backfill:
+        print("\n=== Backfilling repo from monday.com (pre-v5 state entries) ===")
+        for board_type in sorted(active_types):
+            filled = _backfill_repos_from_monday(state, board_type, boards[board_type]["client"])
+            if filled:
+                print(f"  [{board_type}] backfilled repo for {filled} state entries")
+        if not dry_run:
+            save_state(state, state_path)
+
+    # --- Bulk-fetch projects once. Excludes archived repos server-side. ---
+    print("\n=== Fetching active projects from Semgrep ===")
+    try:
+        active_projects = semgrep.fetch_projects()
+    except SemgrepAPIError as exc:
+        print(f"Semgrep API error fetching /projects: {exc}")
+        return
+    active_repo_names: set[str] = {p["name"] for p in active_projects if p.get("name")}
+    print(f"  {len(active_repo_names)} active projects returned by Semgrep")
+
+    total_marked_fixed = 0
+    total_marked_not_scanned = 0
+    stats: dict[str, dict[str, int]] = {}
+    not_scanned_repos_union: set[str] = set()
+
+    for board_type in sorted(active_types):
+        issue_type = board_type.lower()
+        entries = state["monday_items_created"].get(board_type, {})
+        if not entries:
+            print(f"\n=== Reconciling {board_type} items: nothing tracked in state.json ===")
+            continue
+        print(f"\n=== Reconciling {board_type} items ({len(entries)} tracked) ===")
+        s = stats[board_type] = {
+            "tracked": len(entries),
+            "no_repo_items": 0,
+            "repos_tracked": 0,
+            "repos_not_scanned": 0,
+            "items_in_not_scanned_repos": 0,
+            "fixed_findings_seen": 0,
+            "items_marked_fixed": 0,
+            "items_marked_not_scanned": 0,
+        }
+
+        client: MondayClient = boards[board_type]["client"]
+        col_map = client.get_column_map()
+        triage_col_id = col_map.get("Triage State")
+        if not triage_col_id:
+            print(f"  Warning: 'Triage State' column not found on {board_type} board. Skipping.")
+            continue
+
+        # Group entries by repo. Items lacking repo (backfill miss) are skipped.
+        by_repo: dict[str, dict[str, dict]] = {}
+        no_repo_items: list[str] = []
+        for iid, entry in entries.items():
+            repo = item_repo(entry)
+            if not repo:
+                no_repo_items.append(iid)
+                continue
+            if repo in ignored_repos:
+                continue
+            by_repo.setdefault(repo, {})[iid] = entry
+        s["no_repo_items"] = len(no_repo_items)
+        s["repos_tracked"] = len(by_repo)
+        if no_repo_items:
+            print(f"  Warning: {len(no_repo_items)} {board_type} items lack repo — skipping them")
+
+        # --- Fetch fixed findings via v2 in one paginated stream ---
+        print(f"\n=== Fetching fixed {board_type} findings from Semgrep (v2) ===")
+        if fixed_since:
+            print(f"  Filter: onPrimaryBranch=true, aggregateIssueStates=FIXED, since={fixed_since}")
+        else:
+            print(f"  Filter: onPrimaryBranch=true, aggregateIssueStates=FIXED (all time)")
+        try:
+            fixed = semgrep.fetch_fixed_issues_v2(issue_type=issue_type, since=fixed_since)
+        except SemgrepAPIError as exc:
+            print(f"  Semgrep API error: {exc}")
+            continue
+        s["fixed_findings_seen"] = len(fixed)
+        print(f"  {len(fixed)} fixed findings on primary branches returned")
+        fixed_ids = {f.id for f in fixed}
+
+        # --- Case A: items in repos NOT in Semgrep's active-projects list ---
+        not_scanned_this_type: set[str] = set()
+        for repo in by_repo:
+            if repo not in active_repo_names:
+                not_scanned_this_type.add(repo)
+        s["repos_not_scanned"] = len(not_scanned_this_type)
+        s["items_in_not_scanned_repos"] = sum(len(by_repo[r]) for r in not_scanned_this_type)
+        not_scanned_repos_union.update(not_scanned_this_type)
+
+        if not_scanned_this_type:
+            print(f"\n  {len(not_scanned_this_type)} tracked repos not in Semgrep's active projects list — marking their items 'Not scanned by Semgrep'")
+            for repo in sorted(not_scanned_this_type):
+                repo_items = by_repo[repo]
+                print(f"    [{repo}] {len(repo_items)} items")
+                for iid, entry in sorted(repo_items.items()):
+                    if dry_run:
+                        print(f"      [DRY RUN] {board_type} item {iid}: mark 'Not scanned by Semgrep' (findings: {item_finding_ids(entry)})")
+                        s["items_marked_not_scanned"] += 1
+                        total_marked_not_scanned += 1
+                        continue
+                    try:
+                        client.change_column_values(iid, {triage_col_id: {"label": "Not scanned by Semgrep"}})
+                        state["monday_items_created"][board_type].pop(iid, None)
+                        not_scanned_state.setdefault(board_type, {})[iid] = entry
+                        s["items_marked_not_scanned"] += 1
+                        total_marked_not_scanned += 1
+                        print(f"      [{board_type}] item {iid} → Not scanned by Semgrep")
+                    except Exception as exc:
+                        print(f"      [{board_type}] Failed to mark item {iid}: {exc}")
+
+        # --- Case B: for active repos, mark items whose finding_ids match fixed_ids ---
+        items_to_mark: list[tuple[str, str, dict]] = []  # (repo, iid, entry)
+        for repo, repo_items in by_repo.items():
+            if repo in not_scanned_this_type:
+                continue
+            for iid, entry in repo_items.items():
+                my_fids = set(item_finding_ids(entry))
+                if my_fids & fixed_ids:
+                    items_to_mark.append((repo, iid, entry))
+
+        if items_to_mark:
+            print(f"\n  {len(items_to_mark)} {board_type} monday items to mark Fixed")
+            for repo, iid, entry in sorted(items_to_mark):
+                intersect = [fid for fid in item_finding_ids(entry) if fid in fixed_ids]
+                if dry_run:
+                    print(f"    [DRY RUN] {board_type} item {iid} ({repo}): findings {item_finding_ids(entry)} (fixed on main: {intersect})")
+                    s["items_marked_fixed"] += 1
+                    total_marked_fixed += 1
+                    continue
+                try:
+                    client.change_column_values(iid, {triage_col_id: {"label": "Fixed"}})
+                    state["monday_items_created"][board_type].pop(iid, None)
+                    fixed_state.setdefault(board_type, {})[iid] = entry
+                    s["items_marked_fixed"] += 1
+                    total_marked_fixed += 1
+                    print(f"    [{board_type}] item {iid} ({repo}) → Fixed (findings: {item_finding_ids(entry)})")
+                except Exception as exc:
+                    print(f"    [{board_type}] Failed to mark item {iid}: {exc}")
+
+    # --- Summary ---
+    print("\n=== Reconciliation summary ===")
+    for board_type in sorted(stats):
+        s = stats[board_type]
+        prefix = "[DRY RUN] would " if dry_run else ""
+        print(f"  {board_type}:")
+        print(f"    Tracked items in state.json:                     {s['tracked']}")
+        if s['no_repo_items']:
+            print(f"    Items missing repo (skipped this run):           {s['no_repo_items']}")
+        print(f"    Distinct tracked repos:                          {s['repos_tracked']}")
+        print(f"    Fixed findings on primary branches (v2 fetch):   {s['fixed_findings_seen']}")
+        print(f"    Repos not in active projects list:               {s['repos_not_scanned']} ({s['items_in_not_scanned_repos']} items)")
+        print(f"    Items {prefix}marked Fixed:                        {s['items_marked_fixed']}")
+        print(f"    Items {prefix}marked Not scanned by Semgrep:       {s['items_marked_not_scanned']}")
+    if not_scanned_repos_union:
+        print(f"\n  Not-scanned repos ({len(not_scanned_repos_union)}): {', '.join(sorted(not_scanned_repos_union))}")
+
+    if dry_run:
+        print(f"\n[DRY RUN] No monday items updated, no state files modified.")
+        return
+
+    save_state(state, state_path)
+    save_fixed_state(fixed_state, fixed_path)
+    save_not_scanned_state(not_scanned_state, not_scanned_path)
+    print(f"\nDone: {total_marked_fixed} items marked Fixed, {total_marked_not_scanned} items marked Not scanned by Semgrep.")
 
 
 if __name__ == "__main__":
@@ -1026,6 +1455,10 @@ if __name__ == "__main__":
                         help="Disable Semgrep server-side deduplication (omit dedup=true from API calls)")
     parser.add_argument("--dry-run", action="store_true",
                         help="Fetch findings and print IDs without creating monday items or updating state")
+    parser.add_argument("--mark-fixed", action="store_true",
+                        help="After the normal sync, reconcile existing monday items: mark items 'Fixed' when their finding is resolved on the repo's primary branch, and 'Not scanned by Semgrep' when the repo is no longer in Semgrep. SAST + SCA only.")
+    parser.add_argument("--fixed-since-days", type=int, default=None, metavar="N",
+                        help="With --mark-fixed: only consider findings fixed in the last N days (server-side filter via TIME_FILTER_FIXED_AT). Speeds up scheduled runs.")
     args = parser.parse_args()
 
     if args.type:
@@ -1048,3 +1481,11 @@ if __name__ == "__main__":
     run(limit=args.limit, filters_path=resolved_filters_path, types=resolved_types,
         set_triage_reviewing=args.set_triage_reviewing, dry_run=args.dry_run,
         no_dedup=args.no_dedup)
+    if args.mark_fixed:
+        fixed_since_iso: str | None = None
+        if args.fixed_since_days is not None:
+            from datetime import datetime, timedelta, timezone
+            cutoff = datetime.now(timezone.utc) - timedelta(days=args.fixed_since_days)
+            fixed_since_iso = cutoff.strftime("%Y-%m-%dT%H:%M:%SZ")
+        mark_fixed(filters_path=resolved_filters_path, types=resolved_types,
+                   dry_run=args.dry_run, fixed_since=fixed_since_iso)

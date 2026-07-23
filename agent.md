@@ -21,7 +21,7 @@ The numeric deployment ID (required for the Secrets v2 API endpoints) is auto-di
 
 ## Behavior
 
-1. Fetches all open findings from Semgrep (SAST, SCA, Secrets). SAST and SCA use the v1 `/findings` endpoint with `dedup=true`. Secrets use the v2 Issues API (`POST /api/agent/deployments/{id}/issues` with `issueType: ISSUE_TYPE_SECRETS`). After the open secrets fetch, a second POST is made with `aggregateIssueStates: [AGGREGATE_ISSUE_STATE_FIXED]` to capture fixed secrets that were never reviewed — fixed findings whose `note` field contains `monday.com` are skipped (already reviewed). Results are merged and deduplicated by finding ID. The fixed fetch is not subject to `--limit`; it always pages through all fixed secrets so that a limit on open findings cannot cause unreviewed fixed findings to be missed. Because the Semgrep triage API silently ignores note and state changes on FIXED findings (returns 200 but applies nothing), a separate `fixed_state.json` file is used for dedup. Fixed findings are skipped if their ID is in `fixed_state.json` OR if their `note` contains `monday.com` (previously reviewed via the normal open flow). On successful item creation, the finding ID is added to `fixed_state.json` and saved at the end of the run.
+1. Fetches all open findings from Semgrep (SAST, SCA, Secrets). SAST uses two v1 `/findings` calls — `issue_type=sast` and `issue_type=ai_sast` — merged and deduplicated by finding ID before processing. SCA uses the v1 `/findings` endpoint with `dedup=true`. Secrets use the v2 Issues API (`POST /api/agent/deployments/{id}/issues` with `issueType: ISSUE_TYPE_SECRETS`). After the open secrets fetch, a second POST is made with `aggregateIssueStates: [AGGREGATE_ISSUE_STATE_FIXED]` to capture fixed secrets that were never reviewed — fixed findings whose `note` field contains `monday.com` are skipped (already reviewed). Results are merged and deduplicated by finding ID. The fixed fetch is not subject to `--limit`; it always pages through all fixed secrets so that a limit on open findings cannot cause unreviewed fixed findings to be missed. Because the Semgrep triage API silently ignores note and state changes on FIXED findings (returns 200 but applies nothing), a separate `fixed_state.json` file is used for dedup. Fixed findings are skipped if their ID is in `fixed_state.json` OR if their `note` contains `monday.com` (previously reviewed via the normal open flow). On successful item creation, the finding ID is added to `fixed_state.json` and saved at the end of the run. Format v2: `{"version": 2, "SECRETS": [fid, ...], "SAST": {item_id: [fid, ...]}, "SCA": {item_id: [fid, ...]}}`. v1 (secrets-only list) is auto-migrated on load. The SAST/SCA sub-dicts are written to by the `--mark-fixed` mode when it migrates items out of `state.json`.
 2. Drops findings from repos listed under `ignore_repos` in `filters.yaml` across all types.
 3. Loads `state.json` for deduplication. Findings already synced are skipped.
 4. Groups new SAST and SCA findings to reduce board noise (see **Finding grouping** below). Secrets are not grouped.
@@ -91,7 +91,24 @@ python sync.py --filters my.yaml            # use a specific filters file
 python sync.py --no-filters                 # bypass filtering even if filters.yaml exists
 python sync.py --set-triage-reviewing       # triage synced findings to 'reviewing' in Semgrep
 python sync.py --dry-run                    # fetch and print finding IDs, no side effects
+python sync.py --mark-fixed                 # after sync, reconcile items: mark Fixed / Not scanned by Semgrep (SAST + SCA)
 ```
+
+## Mark-fixed reconciliation pass
+
+`--mark-fixed` triggers a reconciliation pass **after** the normal sync completes in the same invocation. It only touches SAST and SCA (Secrets already has its own fixed-pass baked into the sync).
+
+Flow (v2 API — collapses per-repo work into a small handful of paginated calls):
+
+1. **Backfill:** for state entries with `repo=""` (pre-v5 migrations), call monday `get_items_by_ids` on the "Repo" column and fill it in. Save state.json immediately so backfill isn't lost if a later step bails.
+2. **Bulk `/projects` fetch** — one paginated call. Semgrep excludes archived repos, so `repo not in active_repo_names` = "not scanned anymore."
+3. **v2 fixed-findings fetch** — one paginated call per board type via `POST /api/agent/deployments/{id}/issues` with `{aggregateIssueStates: [AGGREGATE_ISSUE_STATE_FIXED], onPrimaryBranch: true}`. When `--fixed-since-days N` is set, adds `timeFilter: TIME_FILTER_FIXED_AT` and `since: <ISO cutoff>` to limit to recent transitions.
+4. **Dispatch per state entry:**
+   - Repo absent from active-projects list → mark `Not scanned by Semgrep`, migrate to `not_scanned_state.json`.
+   - Finding IDs intersect the fetched fixed-on-primary set → mark `Fixed`, migrate to `fixed_state.json`.
+   - Otherwise → leave state untouched.
+
+`--dry-run` prints candidates without touching monday or state files. `--type sast` / `--type sca` narrows scope. `--fixed-since-days N` narrows the v2 fetch to findings fixed in the last N days. Even with `--dry-run` the backfill step is skipped (state.json isn't written during dry-run).
 
 ## Filtering
 
