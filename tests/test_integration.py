@@ -18,6 +18,7 @@ SEMGREP_FINDINGS_URL = "https://semgrep.dev/api/v1/deployments/acme-corp/finding
 SEMGREP_DEPLOYMENTS_URL = "https://semgrep.dev/api/v1/deployments"
 SEMGREP_SECRETS_V2_URL = "https://semgrep.dev/api/agent/deployments/20169/issues"
 SEMGREP_TRIAGE_URL = "https://semgrep.dev/api/v1/deployments/acme-corp/triage"
+SEMGREP_PROJECTS_URL = "https://semgrep.dev/api/v1/deployments/acme-corp/projects"
 MONDAY_URL = "https://api.monday.com/v2"
 
 ACCOUNT_SLUG_RESP = {"data": {"account": {"slug": "acme-test"}}}
@@ -106,19 +107,33 @@ def state_file(tmp_path) -> Path:
     return tmp_path / "state.json"
 
 
+def _add_project_tags(httpx_mock):
+    url_re = re.compile(rf"^{re.escape(SEMGREP_PROJECTS_URL)}/")
+    httpx_mock.add_response(url=url_re, json={"project": {"name": "acme", "tags": ["test-tag"]}})
+
+
 def _add_semgrep_pages(httpx_mock, issue_type, findings):
     url_re = re.compile(rf"^{re.escape(SEMGREP_FINDINGS_URL)}\?.*issue_type={issue_type}")
     httpx_mock.add_response(url=url_re, json={"findings": findings})
     if findings:
         httpx_mock.add_response(url=url_re, json={"findings": []})
+    # Always mock the ai_sast companion call when registering sast pages
+    if issue_type == "sast":
+        ai_url_re = re.compile(rf"^{re.escape(SEMGREP_FINDINGS_URL)}\?.*issue_type=ai_sast")
+        httpx_mock.add_response(url=ai_url_re, json={"findings": []})
 
 
-def _add_secrets(httpx_mock, secrets):
+def _add_secrets(httpx_mock, secrets, fixed_secrets=None):
     httpx_mock.add_response(url=SEMGREP_DEPLOYMENTS_URL, json=DEPLOYMENTS_RESP)
     issues = [{"issue": s, "reviewCount": 0, "allRefs": []} for s in secrets]
     httpx_mock.add_response(
         url=SEMGREP_SECRETS_V2_URL, method="POST",
         json={"issues": issues, "cursor": ""},
+    )
+    fixed_issues = [{"issue": s, "reviewCount": 0, "allRefs": []} for s in (fixed_secrets or [])]
+    httpx_mock.add_response(
+        url=SEMGREP_SECRETS_V2_URL, method="POST",
+        json={"issues": fixed_issues, "cursor": ""},
     )
 
 
@@ -130,6 +145,8 @@ def _add_triage_responses(httpx_mock, n):
 
 def _add_monday_responses(httpx_mock, n_sast=0, n_sca=0, n_secrets=0, with_triage=False):
     """Register monday responses in actual call order: col query → creates per board."""
+    if n_sast + n_sca + n_secrets > 0:
+        _add_project_tags(httpx_mock)
     counter = [0]
 
     def next_id():
@@ -215,6 +232,7 @@ def test_partial_failure_recovery(httpx_mock, env_vars, state_file):
     _add_semgrep_pages(httpx_mock, "sast", findings)
     _add_semgrep_pages(httpx_mock, "sca", [])
     _add_secrets(httpx_mock, [])
+    _add_project_tags(httpx_mock)
 
     monday = MagicMock()
     monday.get_column_map.return_value = {"Finding ID": "c0", "Severity": "c1", "Rule": "c2", "File": "c3", "Repo": "c4"}
@@ -249,6 +267,11 @@ def test_secrets_cursor_exhausted(httpx_mock, env_vars, state_file):
         url=SEMGREP_SECRETS_V2_URL, method="POST",
         json={"issues": [{"issue": secret_302, "reviewCount": 0, "allRefs": []}], "cursor": ""},
     )
+    # Fixed secrets second-pass
+    httpx_mock.add_response(
+        url=SEMGREP_SECRETS_V2_URL, method="POST",
+        json={"issues": [], "cursor": ""},
+    )
 
     _add_monday_responses(httpx_mock, n_secrets=2)
 
@@ -277,8 +300,8 @@ def test_sca_grouping_creates_single_item(httpx_mock, env_vars, state_file):
     state = json.loads(state_file.read_text())
     assert sync.synced_finding_ids(state, "SCA") == {"201", "202"}
     assert len(state["monday_items_created"]["SCA"]) == 1
-    item_fids = list(state["monday_items_created"]["SCA"].values())[0]
-    assert sorted(item_fids) == ["201", "202"]
+    item_entry = list(state["monday_items_created"]["SCA"].values())[0]
+    assert sorted(item_entry["finding_ids"]) == ["201", "202"]
 
 
 def test_set_triage_reviewing_flag(httpx_mock, env_vars, state_file):
@@ -300,3 +323,57 @@ def test_set_triage_reviewing_flag(httpx_mock, env_vars, state_file):
     assert body["new_triage_state"] == "reviewing"
     assert body["issue_ids"] == [101]
     assert "Created monday item:" in body["new_note"]
+
+
+def _fixed_secret_finding(fid):
+    f = _secret_finding(fid)
+    f["aggregateState"] = "AGGREGATE_ISSUE_STATE_FIXED"
+    f["triageState"] = "FINDING_TRIAGE_STATE_UNTRIAGED"
+    return f
+
+
+def test_fixed_secret_synced_to_fixed_state_file(httpx_mock, env_vars, state_file):
+    """A fixed secret with no note is synced and its ID written to fixed_state.json."""
+    _add_semgrep_pages(httpx_mock, "sast", [])
+    _add_semgrep_pages(httpx_mock, "sca", [])
+    _add_secrets(httpx_mock, [], fixed_secrets=[_fixed_secret_finding("401")])
+    _add_monday_responses(httpx_mock, n_secrets=1)
+
+    sync.run(state_path=state_file, filters_path=None)
+
+    fixed_synced_path = state_file.parent / "fixed_state.json"
+    assert fixed_synced_path.exists()
+    data = json.loads(fixed_synced_path.read_text())
+    assert "401" in data["SECRETS"]
+
+
+def test_fixed_secret_not_resynced_on_second_run(httpx_mock, env_vars, state_file):
+    """A fixed secret already in fixed_state.json is skipped on the next run."""
+    fixed_synced_path = state_file.parent / "fixed_state.json"
+    fixed_synced_path.write_text(json.dumps({"version": 1, "SECRETS": ["401"]}))
+
+    _add_semgrep_pages(httpx_mock, "sast", [])
+    _add_semgrep_pages(httpx_mock, "sca", [])
+    _add_secrets(httpx_mock, [], fixed_secrets=[_fixed_secret_finding("401")])
+    _add_monday_responses(httpx_mock)  # no items expected
+
+    sync.run(state_path=state_file, filters_path=None)
+
+    state = json.loads(state_file.read_text())
+    assert sync.synced_finding_ids(state, "Secrets") == set()
+
+
+def test_fixed_secret_with_monday_note_skipped(httpx_mock, env_vars, state_file):
+    """A fixed secret whose note contains 'monday.com' is not re-synced."""
+    f = _fixed_secret_finding("402")
+    f["note"] = "Created monday item: https://acme.monday.com/boards/1/pulses/2"
+
+    _add_semgrep_pages(httpx_mock, "sast", [])
+    _add_semgrep_pages(httpx_mock, "sca", [])
+    _add_secrets(httpx_mock, [], fixed_secrets=[f])
+    _add_monday_responses(httpx_mock)  # no items expected
+
+    sync.run(state_path=state_file, filters_path=None)
+
+    state = json.loads(state_file.read_text())
+    assert sync.synced_finding_ids(state, "Secrets") == set()

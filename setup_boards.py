@@ -46,6 +46,7 @@ BOARD_COLUMNS: dict[str, list[str]] = {
         "Sourcing Policy",
         "External Ticket",
         "Rule Explanation",
+        "Project Tags",
     ],
     "SCA": [
         "Finding ID",
@@ -71,6 +72,7 @@ BOARD_COLUMNS: dict[str, list[str]] = {
         "Categories",
         "Code URL",
         "Semgrep URL",
+        "Project Tags",
     ],
     "Secrets": [
         "Finding ID",
@@ -87,6 +89,7 @@ BOARD_COLUMNS: dict[str, list[str]] = {
         "OWASP",
         "Code URL",
         "Semgrep URL",
+        "Project Tags",
     ],
 }
 
@@ -110,6 +113,7 @@ COLUMN_TYPES: dict[str, str] = {
     "Semgrep URL":      "link",
     "Code URL":         "link",
     "Secret Type":      "dropdown",
+    "Project Tags":     "dropdown",
 }
 
 

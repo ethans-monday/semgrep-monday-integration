@@ -20,6 +20,8 @@
 #     rule            — [rule.id.one, rule.id.two]      (repeatable — any match)
 #     ai_verdict      — [true_positive | false_positive] (single value only — scalar param)
 #     status          — [open, fixed, ignored, reviewing, fixing, provisionally_ignored]
+#     file_risk_level — [high, low, unknown]  (client-side; maps to Semgrep's component risk.
+#                        high = user_auth/payments/pii/infra etc.; unknown = unclassified files)
 #
 #   sca:
 #     severity        — [low, medium, high, critical]  (repeatable — any match)
@@ -48,6 +50,11 @@
 #                          (single value only — scalar param)
 #     exclude_historical — [true]  (boolean trigger: filters out historical secrets)
 
+# --- Repos to exclude from all finding types (applied after fetching) ---
+# Findings from these repos are silently dropped regardless of type or filter config.
+# ignore_repos:
+#   - dummy_repo_for_commit_scanning
+
 # --- Recommended: only open findings (pairs with --set-triage-reviewing) ---
 # The sync script triages each finding to "reviewing" in Semgrep after creating
 # the monday item. Filtering by open status ensures already-reviewed findings
@@ -59,10 +66,11 @@
 # secrets:
 #   status: [ISSUE_TAB_OPEN]
 
-# --- Worked example 1: high+critical SAST that AI flagged as true positive ---
+# --- Worked example 1: high+critical SAST from high-risk files, AI flagged as true positive ---
 # sast:
 #   severity: [high, critical]
 #   ai_verdict: [true_positive]
+#   file_risk_level: [high]
 
 # --- Worked example 2: reachable direct SCA only ---
 # sca:

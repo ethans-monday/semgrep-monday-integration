@@ -11,13 +11,13 @@ Semgrep Cloud API  -->  sync.py  -->  monday.com GraphQL API
 
 ## What Gets Synced
 
-**SAST board (23 columns)** -- AI triage verdict, CWE, OWASP, vulnerability classes, AI guidance, autofix availability, component risk, rule explanation, Semgrep deep-link, and more.
+**SAST board (24 columns)** -- Covers both standard SAST (`issue_type=sast`) and AI-powered SAST (`issue_type=ai_sast`) findings, merged into the same board. AI triage verdict, CWE, OWASP, vulnerability classes, AI guidance, autofix availability, component risk, rule explanation, project tags, Semgrep deep-link, and more.
 
-**SCA board (23 columns)** -- CVE, reachability status, EPSS score/percentile, vulnerable package + version, ecosystem, transitivity, fix recommendations, malicious package flag, Semgrep deep-link.
+**SCA board (24 columns)** -- CVE, reachability status, EPSS score/percentile, vulnerable package + version, ecosystem, transitivity, fix recommendations, malicious package flag, project tags, Semgrep deep-link.
 
-**Secrets board (13 columns)** -- Validation state (confirmed valid/invalid/unvalidated), confidence, secret type, triage state, CWE, OWASP, message, standard finding metadata, Semgrep deep-link.
+**Secrets board (15 columns)** -- Validation state (confirmed valid/invalid/unvalidated), confidence, secret type, triage state, CWE, OWASP, message, project tags, standard finding metadata, Semgrep deep-link. Includes both open/reviewing secrets **and** fixed secrets that were never reviewed (see below).
 
-All boards include: Finding ID, severity, confidence, rule name, triage state, file location, repo, code URL, and Semgrep URL.
+All boards include: Finding ID, severity, confidence, rule name, triage state, file location, repo, code URL, Semgrep URL, and project tags (auto-populated from Semgrep project metadata).
 
 ### Updates feed
 
@@ -76,8 +76,11 @@ This creates three boards (Semgrep SAST Findings, Semgrep SCA Findings, Semgrep 
 
 ```bash
 python sync.py                            # sync all open findings
-python sync.py --limit 50                 # sync up to 50 per type (for testing)
+python sync.py --limit 50                 # create at most 50 monday items per type (for testing)
+python sync.py --fetch-limit 500          # cap Semgrep fetch at 500 findings per type (default: 10000)
 python sync.py --set-triage-reviewing     # also triage findings in Semgrep
+python sync.py --dry-run                  # fetch and print finding IDs, no side effects
+python sync.py --mark-fixed               # after sync, reconcile items: mark Fixed / Not scanned by Semgrep (SAST + SCA)
 ```
 
 ## Configuration
@@ -98,7 +101,7 @@ python sync.py --set-triage-reviewing     # also triage findings in Semgrep
 
 SAST and SCA findings are automatically grouped to reduce board noise:
 
-- **SCA:** Findings with the same `{repo, package, version}` become a single board item. The CVE column contains all CVEs (comma-separated). The item's representative (used for severity, file, links) is chosen by highest severity → reachable → highest confidence.
+- **SCA:** Findings with the same `{repo, package, file}` become a single board item. The CVE column contains all CVEs (comma-separated). The item's representative (used for severity, file, links) is chosen by highest severity → reachable → highest confidence.
 - **SAST:** Findings with the same `{repo, file, end location}` become a single board item. Rule names, CWEs, OWASP, and vulnerability classes are merged. Representative chosen by highest severity → AI true positive → highest confidence.
 
 Grouped items get a richer Updates-feed post listing each member finding's details and Semgrep URL. All member finding IDs are tracked in `state.json`, so re-runs won't re-sync any of them.
@@ -119,13 +122,49 @@ The monday.com account slug (subdomain) is auto-discovered via the `account { sl
 
 Without the flag, triage is skipped and dedup relies entirely on `state.json`.
 
+### Reconcile fixed / not-scanned items (SAST + SCA)
+
+Pass `--mark-fixed` to run a reconciliation pass **after** the normal sync. It updates existing monday items whose state in Semgrep has changed since they were created.
+
+```bash
+python sync.py --mark-fixed                       # sync + reconcile in one invocation
+python sync.py --mark-fixed --dry-run             # preview what would change
+python sync.py --mark-fixed --type sca            # limit reconciliation to SAST or SCA
+python sync.py --mark-fixed --fixed-since-days 7  # only consider findings fixed in the past 7 days
+```
+
+Under the hood, reconciliation uses Semgrep's v2 Issues API to avoid per-repo round-trips:
+
+1. **Bulk `/projects` fetch** — one paginated call. Semgrep excludes archived repos from this list, so absence from it is our "no longer scanned" signal.
+2. **v2 `/issues` fetch** — one paginated call per board type with filter `{aggregateIssueStates: [AGGREGATE_ISSUE_STATE_FIXED], onPrimaryBranch: true}` (plus optional `timeFilter: TIME_FILTER_FIXED_AT` + `since` when `--fixed-since-days N` is set). Returns all fixed findings across all repos in one stream.
+3. **Match + mark:**
+   - Any state.json entry whose repo is **absent from the projects list** → "Triage State" = `Not scanned by Semgrep`, migrated to `not_scanned_state.json`.
+   - Any state.json entry whose `finding_ids` intersect the v2 fixed-on-primary set → "Triage State" = `Fixed`, migrated to `fixed_state.json`.
+
+`state.json` v5 stores the `repo` per item alongside its finding IDs, populated at item creation time. Pre-v5 entries have `repo=""` and are backfilled lazily via monday's "Repo" column the first time `--mark-fixed` runs against them.
+
+Secrets are not handled by `--mark-fixed` — Secrets already has its own fixed-pass baked into the normal sync run.
+
 ### Idempotent syncs
 
 The script tracks synced findings in `state.json` as a fallback. Running it multiple times is safe -- findings already synced are skipped. This makes it suitable for cron jobs or scheduled runs.
 
-### The --limit flag
+### The --limit and --fetch-limit flags
 
-Use `--limit N` to cap the number of findings fetched per type. Useful for initial testing or when you want to gradually populate boards.
+- `--limit N` — target number of monday items to **create** per board type this run. The fetch loop stops as soon as `N` post-filter, post-grouping, post-dedup-against-state items have been collected. Semgrep API calls stop early — no over-fetching.
+- `--fetch-limit N` — safety cap on total findings fetched per issue_type from Semgrep (default: 10000). Guards against a pathological filter paging forever.
+
+**How SAST fetching works with `--limit`:**
+
+SAST pulls from two Semgrep endpoints (`issue_type=sast` and `issue_type=ai_sast`), iterated sequentially. If the SAST endpoint alone produces enough items to reach `--limit`, the AI SAST endpoint is **not called at all** — no wasted API calls. AI SAST is only fetched when SAST is exhausted or insufficient.
+
+SCA uses the same pattern but with **malicious packages fetched first**, then regular SCA. Malicious findings are severe, so they are prioritized — a small `--limit` cannot starve them.
+
+**Page-size hint.** When `--limit N` is set, the client requests pages of size `min(max(100, N × 3), 3000)` — small pages when you only need a few items, larger pages when you need many. Semgrep's v1 API requires `100 ≤ page_size ≤ 3000`.
+
+**Example:** `--limit 10` fetches with `page_size=100`. If the first page produces ≥10 items after filtering and grouping, one API call is made and the sync stops there.
+
+**Yield-rate caveat.** Because grouping + client-side filters (`file_risk_level`, `ai_verdict: [not_analyzed]`) collapse and drop findings, more findings are fetched than items created. Roughly: `raw_fetched ≈ items × (filter_pass_rate × group_compression)⁻¹`. If your filter drops most findings, more pages are needed.
 
 ### Filtering
 
@@ -164,6 +203,13 @@ secrets:
   validation_state: [VALIDATION_STATE_CONFIRMED_VALID]
 ```
 
+**Ignored repos:** add a top-level `ignore_repos` list to `filters.yaml` to silently drop findings from specific repos across all three finding types:
+
+```yaml
+ignore_repos:
+  - dummy_repo_for_commit_scanning
+```
+
 **Semantics:** all keys within a block must match (AND); all values within a list match as OR. Unknown keys and unknown board types cause a hard failure at load time — typos are caught immediately. Non-list values (e.g. `severity: HIGH` instead of `severity: [HIGH]`) also fail with a clear error.
 
 **Supported filter keys per board type:**
@@ -175,6 +221,7 @@ secrets:
 | `repo` | ✓ | ✓ | ✓ |
 | `rule` | ✓ | | |
 | `ai_verdict` | ✓ (true_positive, false_positive, not_analyzed¹) | | |
+| `file_risk_level` | ✓ (high, low, unknown²) | | |
 | `status` | ✓ (open/fixed/ignored/reviewing/fixing/provisionally_ignored) | ✓ | ✓ scalar (ISSUE_TAB_OPEN/REVIEWING/IGNORED/CLOSED/FIXING) |
 | `reachability` | | ✓ | |
 | `transitivity` | | ✓ | |
@@ -185,6 +232,8 @@ secrets:
 | `exclude_historical` | | | ✓ ([true])³ |
 
 ¹ `not_analyzed` (and any list that includes it) is applied client-side after fetching — the Semgrep v1 API has no equivalent param for findings where the AI verdict field is absent.
+
+² `file_risk_level` is always applied client-side — the Semgrep v1 API has no server-side param for it. Maps to `assistant.component.risk`: `high` (user_auth/payments/pii/infra etc.), `low` (tests/build scripts/generated code etc.), `unknown` (unclassified files, `component.risk = "neutral"`). Findings are downloaded and filtered after fetch.
 
 ² `malicious: [true]` triggers a second SCA query with only `is_malicious=true` — no other SCA filters (severity, reachability, etc.) are applied to it. Results are merged with the primary SCA fetch and deduplicated.
 
@@ -261,7 +310,7 @@ The script handles monday.com rate limiting automatically by respecting the `Ret
 | Pro | 10,000 |
 | Enterprise | 25,000 |
 
-**API calls per new finding:** each finding creates **two** monday.com calls (one `create_item`, one `create_update`) plus **one** Semgrep API call (`triage`). A full sync of 1,000 new findings costs roughly **2,004 monday.com calls** (3 column-map queries + 1 account-slug query + 1,000 × 2) and **1,000 Semgrep triage calls**. Plan your tier and cron cadence accordingly — idempotent re-runs only spend calls on *new* findings.
+**API calls per new finding:** each finding creates **two** monday.com calls (one `create_item`, one `create_update`) plus **one** Semgrep API call (`triage`). Each unique repo also costs **one** Semgrep API call to fetch project tags (cached per run — subsequent findings from the same repo reuse the cached result). A full sync of 1,000 new findings costs roughly **2,004 monday.com calls** (3 column-map queries + 1 account-slug query + 1,000 × 2) and **1,000 Semgrep triage calls** plus one project-tags call per unique repo. Plan your tier and cron cadence accordingly — idempotent re-runs only spend calls on *new* findings.
 
 ### Semgrep API
 
@@ -271,10 +320,20 @@ No documented rate limits for the findings REST API. The script uses reasonable 
 
 **404 on findings endpoint** -- verify your deployment slug is correct. It should match the URL path at `semgrep.dev/orgs/<slug>`, not your org display name.
 
-**Rate limited (429 errors)** -- the script auto-retries up to 3 times, honouring the `Retry-After` header. If you're on a free monday.com plan with 200 calls/day, use `--limit` to stay within budget.
+**Rate limited (429 errors)** -- the script auto-retries up to 3 times, honouring the `Retry-After` header. If you're on a free monday.com plan with 200 calls/day, use `--limit` to cap monday items created per run and stay within budget.
 
 **Update post failed: ...** -- the monday.com item was created but the Updates-feed body couldn't be posted (usually a transient network reset). The finding is still recorded in state; only the rich update body is missing. Re-running will not re-attempt the failed update.
 
 **Empty secrets results** -- confirm that Secrets scanning is enabled in your Semgrep org. The numeric deployment ID is auto-discovered from your slug; no manual configuration is needed. If using `status: [ISSUE_TAB_OPEN]`, verify that untriaged secrets exist in the Semgrep UI.
+
+### Fixed secrets (never-reviewed)
+
+After the normal open secrets fetch, the script performs a second Secrets fetch with `aggregateIssueStates: [AGGREGATE_ISSUE_STATE_FIXED]`. Fixed findings are included only if their Semgrep `note` field does **not** contain `monday.com` — meaning they were never previously reviewed via this sync. Fixed findings that already have a monday item URL in their note (written by `--set-triage-reviewing`) are silently skipped.
+
+This catches secrets that were committed and immediately rotated/fixed before the sync ran, which would otherwise never be reviewed.
+
+Results are merged with the open secrets fetch and deduplicated by finding ID. No extra configuration is needed — this second pass always runs when the Secrets board is active. The fixed fetch is not subject to `--fetch-limit` so a cap on open findings never causes unreviewed fixed findings to be missed; it pages through all fixed secrets regardless.
+
+Because the Semgrep triage API silently ignores writes to FIXED findings (returns 200 but applies nothing), a separate `fixed_state.json` file is written alongside `state.json` to track which fixed-secret IDs have already been synced. A fixed finding is skipped if its ID is in `fixed_state.json` or if its `note` already contains `monday.com`.
 
 **Column not found errors** -- run `setup_boards.py` to create boards with the correct column layout. Don't manually add, rename, or delete columns on the boards the script writes to.
