@@ -1426,20 +1426,23 @@ def mark_fixed(
         if no_repo_items:
             print(f"  Warning: {len(no_repo_items)} {board_type} items lack repo — skipping them")
 
-        # --- Fetch fixed findings via v2 in one paginated stream ---
-        print(f"\n=== Fetching fixed {board_type} findings from Semgrep (v2) ===")
+        # --- Fetch fixed + open primary findings via v2 ---
+        print(f"\n=== Fetching primary-branch findings from Semgrep (v2) ===")
         if fixed_since:
-            print(f"  Filter: onPrimaryBranch=true, aggregateIssueStates=FIXED, since={fixed_since}")
+            print(f"  Fixed filter: onPrimaryBranch=true, aggregateIssueStates=FIXED, since={fixed_since}")
         else:
-            print(f"  Filter: onPrimaryBranch=true, aggregateIssueStates=FIXED (all time)")
+            print(f"  Fixed filter: onPrimaryBranch=true, aggregateIssueStates=FIXED (all time)")
         try:
             fixed = semgrep.fetch_fixed_issues_v2(issue_type=issue_type, since=fixed_since)
+            open_primary = semgrep.fetch_open_primary_issues_v2(issue_type=issue_type)
         except SemgrepAPIError as exc:
             print(f"  Semgrep API error: {exc}")
             continue
         s["fixed_findings_seen"] = len(fixed)
         print(f"  {len(fixed)} fixed findings on primary branches returned")
+        print(f"  {len(open_primary)} open findings on primary branches returned")
         fixed_ids = {f.id for f in fixed}
+        open_primary_ids = {f.id for f in open_primary}
 
         # --- Case A: items in repos NOT in Semgrep's active-projects list ---
         not_scanned_this_type: set[str] = set()
@@ -1478,7 +1481,8 @@ def mark_fixed(
                 continue
             for iid, entry in repo_items.items():
                 my_fids = set(item_finding_ids(entry))
-                if my_fids & fixed_ids:
+                primary_fids = my_fids & (fixed_ids | open_primary_ids)
+                if primary_fids and primary_fids.issubset(fixed_ids):
                     items_to_mark.append((repo, iid, entry))
 
         if items_to_mark:

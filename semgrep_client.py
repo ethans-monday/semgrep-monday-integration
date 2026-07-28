@@ -391,6 +391,35 @@ class SemgrepClient:
             results.extend(f for f in ai_results if f.id not in seen)
         return results
 
+    def fetch_open_primary_issues_v2(
+        self,
+        issue_type: str,
+        max_findings: int = 1_000_000,
+    ) -> list[Finding]:
+        """Fetch open findings on the primary branch via the v2 Issues API.
+
+        Server-side filters: aggregateIssueStates = OPEN, onPrimaryBranch = true.
+
+        Args:
+            issue_type: ``"sast"`` or ``"sca"``.
+            max_findings: Safety cap; defaults to 1M (effectively unbounded).
+
+        Returns:
+            List of Finding objects (id + repo minimally populated).
+        """
+        if issue_type not in ("sast", "sca"):
+            raise SemgrepAPIError(f"fetch_open_primary_issues_v2 supports sast/sca; got '{issue_type}'")
+        filter_params: dict = {
+            "aggregateIssueStates": ["AGGREGATE_ISSUE_STATE_OPEN"],
+            "onPrimaryBranch": True,
+        }
+        results = self._fetch_v2_issues(issue_type, max_findings, filter_params)
+        if issue_type == "sast":
+            ai_results = self._fetch_v2_issues("ai_sast", max_findings, filter_params)
+            seen = {f.id for f in results}
+            results.extend(f for f in ai_results if f.id not in seen)
+        return results
+
     def triage_findings(
         self,
         finding_ids: list[str],
