@@ -161,6 +161,111 @@ def test_fetch_secrets_stops_on_empty_results(httpx_mock):
 
 
 # ---------------------------------------------------------------------------
+# fetch_issue_states_v2 — targeted primary-branch status lookup
+# ---------------------------------------------------------------------------
+
+def _state_issue(fid, aggregate_state):
+    return _v2_issue_wrapper({"id": fid, "aggregateState": aggregate_state})
+
+
+def test_fetch_issue_states_maps_fixed_and_open(httpx_mock):
+    """Returns {fid: is_fixed}; FIXED aggregateState -> True, others -> False."""
+    httpx_mock.add_response(url=DEPLOYMENTS_URL, json=DEPLOYMENTS_RESPONSE)
+    httpx_mock.add_response(
+        url=SECRETS_V2_URL, method="POST",
+        json={"issues": [
+            _state_issue("1", "AGGREGATE_ISSUE_STATE_FIXED"),
+            _state_issue("2", "AGGREGATE_ISSUE_STATE_OPEN"),
+        ], "cursor": ""},
+    )
+
+    states = make_client().fetch_issue_states_v2("sca", ["1", "2"])
+    assert states == {"1": True, "2": False}
+
+
+def test_fetch_issue_states_excludes_absent_ids(httpx_mock):
+    """IDs not returned (not on primary branch) are absent from the result."""
+    httpx_mock.add_response(url=DEPLOYMENTS_URL, json=DEPLOYMENTS_RESPONSE)
+    httpx_mock.add_response(
+        url=SECRETS_V2_URL, method="POST",
+        json={"issues": [_state_issue("1", "AGGREGATE_ISSUE_STATE_FIXED")], "cursor": ""},
+    )
+
+    states = make_client().fetch_issue_states_v2("sca", ["1", "2", "3"])
+    assert states == {"1": True}
+    assert "2" not in states and "3" not in states
+
+
+def test_fetch_issue_states_sends_ids_filter_on_primary(httpx_mock):
+    """Request body carries the ids filter with onPrimaryBranch: true."""
+    httpx_mock.add_response(url=DEPLOYMENTS_URL, json=DEPLOYMENTS_RESPONSE)
+    httpx_mock.add_response(
+        url=SECRETS_V2_URL, method="POST",
+        json={"issues": [_state_issue("1", "AGGREGATE_ISSUE_STATE_FIXED")], "cursor": ""},
+    )
+
+    make_client().fetch_issue_states_v2("sca", ["1"])
+
+    import json
+    post = [r for r in httpx_mock.get_requests() if r.method == "POST"][0]
+    body = json.loads(post.content)
+    assert body["filter"]["ids"] == ["1"]
+    assert body["filter"]["onPrimaryBranch"] is True
+    assert body["issueType"] == "ISSUE_TYPE_SCA"
+
+
+def test_fetch_issue_states_empty_ids_no_request(httpx_mock):
+    """No IDs -> returns {} without any HTTP call (not even deployment lookup)."""
+    states = make_client().fetch_issue_states_v2("sca", [])
+    assert states == {}
+    assert httpx_mock.get_requests() == []
+
+
+def test_fetch_issue_states_sast_queries_both_types(httpx_mock):
+    """SAST looks up both ISSUE_TYPE_SAST and ISSUE_TYPE_AI_SAST."""
+    httpx_mock.add_response(url=DEPLOYMENTS_URL, json=DEPLOYMENTS_RESPONSE)
+    # sast page
+    httpx_mock.add_response(
+        url=SECRETS_V2_URL, method="POST",
+        json={"issues": [_state_issue("1", "AGGREGATE_ISSUE_STATE_OPEN")], "cursor": ""},
+    )
+    # ai_sast page — fixed here, FIXED wins on duplicate id
+    httpx_mock.add_response(
+        url=SECRETS_V2_URL, method="POST",
+        json={"issues": [_state_issue("1", "AGGREGATE_ISSUE_STATE_FIXED")], "cursor": ""},
+    )
+
+    states = make_client().fetch_issue_states_v2("sast", ["1"])
+    assert states == {"1": True}
+
+    import json
+    types = [json.loads(r.content)["issueType"]
+             for r in httpx_mock.get_requests() if r.method == "POST"]
+    assert types == ["ISSUE_TYPE_SAST", "ISSUE_TYPE_AI_SAST"]
+
+
+def test_fetch_issue_states_cursor_pagination(httpx_mock):
+    """A single id-chunk is cursor-paginated to completion."""
+    httpx_mock.add_response(url=DEPLOYMENTS_URL, json=DEPLOYMENTS_RESPONSE)
+    httpx_mock.add_response(
+        url=SECRETS_V2_URL, method="POST",
+        json={"issues": [_state_issue("1", "AGGREGATE_ISSUE_STATE_OPEN")], "cursor": "next"},
+    )
+    httpx_mock.add_response(
+        url=SECRETS_V2_URL, method="POST",
+        json={"issues": [_state_issue("2", "AGGREGATE_ISSUE_STATE_FIXED")], "cursor": ""},
+    )
+
+    states = make_client().fetch_issue_states_v2("sca", ["1", "2"])
+    assert states == {"1": False, "2": True}
+
+
+def test_fetch_issue_states_rejects_bad_type():
+    with pytest.raises(SemgrepAPIError, match="sast/sca"):
+        make_client().fetch_issue_states_v2("secrets", ["1"])
+
+
+# ---------------------------------------------------------------------------
 # Auth header
 # ---------------------------------------------------------------------------
 

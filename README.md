@@ -133,13 +133,13 @@ python sync.py --mark-fixed --type sca            # limit reconciliation to SAST
 python sync.py --mark-fixed --fixed-since-days 7  # only consider findings fixed in the past 7 days
 ```
 
-Under the hood, reconciliation uses Semgrep's v2 Issues API to avoid per-repo round-trips:
+Under the hood, reconciliation uses Semgrep's v2 Issues API and only ever queries findings we already track — it never pages the whole deployment backlog:
 
-1. **Bulk `/projects` fetch** — one paginated call. Semgrep excludes archived repos from this list, so absence from it is our "no longer scanned" signal.
-2. **v2 `/issues` fetch** — one paginated call per board type with filter `{aggregateIssueStates: [AGGREGATE_ISSUE_STATE_FIXED], onPrimaryBranch: true}` (plus optional `timeFilter: TIME_FILTER_FIXED_AT` + `since` when `--fixed-since-days N` is set). Returns all fixed findings across all repos in one stream.
-3. **Match + mark:**
-   - Any state.json entry whose repo is **absent from the projects list** → "Triage State" = `Not scanned by Semgrep`, migrated to `not_scanned_state.json`.
-   - Any state.json entry whose `finding_ids` intersect the v2 fixed-on-primary set → "Triage State" = `Fixed`, migrated to `fixed_state.json`.
+1. **Bulk `/projects` fetch** — one paginated call. Semgrep excludes archived repos from this list, so absence from it is our "no longer scanned" signal → items in those repos become `Not scanned by Semgrep` (migrated to `not_scanned_state.json`).
+2. **Fixed detection** — for items in active repos, in one of two modes:
+   - **With `--fixed-since-days N`:** fetch the small set of findings recently marked FIXED on the primary branch (`{aggregateIssueStates: [AGGREGATE_ISSUE_STATE_FIXED], onPrimaryBranch: true, timeFilter: TIME_FILTER_FIXED_AT, since}`). Candidate items are those with ≥1 finding in that set. A **single-finding** candidate is marked Fixed immediately. A **multi-finding** candidate has just its own findings' current statuses pulled via the `ids` filter to confirm they're all fixed.
+   - **Without `--fixed-since-days`:** look up the current primary-branch status of every tracked finding directly via the `ids` filter (`{ids: [...], onPrimaryBranch: true}`, batched). No time window — bounded instead by the number of findings in `state.json`.
+3. **Mark:** an item → "Triage State" = `Fixed` (migrated to `fixed_state.json`) only when **all** of its primary-branch finding IDs are fixed. Items with any finding still open on the primary branch are left untouched; findings not on the primary branch are ignored.
 
 `state.json` v5 stores the `repo` per item alongside its finding IDs, populated at item creation time. Pre-v5 entries have `repo=""` and are backfilled lazily via monday's "Repo" column the first time `--mark-fixed` runs against them.
 

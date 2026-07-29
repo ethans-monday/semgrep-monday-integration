@@ -103,11 +103,11 @@ Flow (v2 API — collapses per-repo work into a small handful of paginated calls
 
 1. **Backfill:** for state entries with `repo=""` (pre-v5 migrations), call monday `get_items_by_ids` on the "Repo" column and fill it in. Save state.json immediately so backfill isn't lost if a later step bails.
 2. **Bulk `/projects` fetch** — one paginated call. Semgrep excludes archived repos, so `repo not in active_repo_names` = "not scanned anymore."
-3. **v2 fixed-findings fetch** — one paginated call per board type via `POST /api/agent/deployments/{id}/issues` with `{aggregateIssueStates: [AGGREGATE_ISSUE_STATE_FIXED], onPrimaryBranch: true}`. When `--fixed-since-days N` is set, adds `timeFilter: TIME_FILTER_FIXED_AT` and `since: <ISO cutoff>` to limit to recent transitions.
-4. **Dispatch per state entry:**
-   - Repo absent from active-projects list → mark `Not scanned by Semgrep`, migrate to `not_scanned_state.json`.
-   - Finding IDs intersect the fetched fixed-on-primary set → mark `Fixed`, migrate to `fixed_state.json`.
-   - Otherwise → leave state untouched.
+3. **Case A — not scanned:** repo absent from active-projects list → mark `Not scanned by Semgrep`, migrate to `not_scanned_state.json`.
+4. **Case B — fixed detection** (active-repo items), never pages the whole backlog:
+   - **`--fixed-since-days N` set:** fetch the small recently-FIXED-on-primary set (`{aggregateIssueStates: [AGGREGATE_ISSUE_STATE_FIXED], onPrimaryBranch: true, timeFilter: TIME_FILTER_FIXED_AT, since}`). Candidates = items with ≥1 finding in that set. Single-finding candidate → mark Fixed (no extra call). Multi-finding candidate → pull just its findings' current statuses via `fetch_issue_states_v2` (the `ids` filter).
+   - **flag absent:** look up the current primary-branch status of every tracked finding directly via `fetch_issue_states_v2` (`{ids: [...], onPrimaryBranch: true}`, chunked ~100/request + cursor-paginated). Bounded by `state.json` size, not the deployment backlog.
+5. **Mark Fixed:** only when ALL of an item's primary-branch finding IDs are fixed (partial fix → left untouched; findings not on primary → ignored). Migrate to `fixed_state.json`. Otherwise leave state untouched.
 
 `--dry-run` prints candidates without touching monday or state files. `--type sast` / `--type sca` narrows scope. `--fixed-since-days N` narrows the v2 fetch to findings fixed in the last N days. Even with `--dry-run` the backfill step is skipped (state.json isn't written during dry-run).
 

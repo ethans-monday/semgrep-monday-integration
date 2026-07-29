@@ -1426,24 +1426,6 @@ def mark_fixed(
         if no_repo_items:
             print(f"  Warning: {len(no_repo_items)} {board_type} items lack repo — skipping them")
 
-        # --- Fetch fixed + open primary findings via v2 ---
-        print(f"\n=== Fetching primary-branch findings from Semgrep (v2) ===")
-        if fixed_since:
-            print(f"  Fixed filter: onPrimaryBranch=true, aggregateIssueStates=FIXED, since={fixed_since}")
-        else:
-            print(f"  Fixed filter: onPrimaryBranch=true, aggregateIssueStates=FIXED (all time)")
-        try:
-            fixed = semgrep.fetch_fixed_issues_v2(issue_type=issue_type, since=fixed_since)
-            open_primary = semgrep.fetch_open_primary_issues_v2(issue_type=issue_type)
-        except SemgrepAPIError as exc:
-            print(f"  Semgrep API error: {exc}")
-            continue
-        s["fixed_findings_seen"] = len(fixed)
-        print(f"  {len(fixed)} fixed findings on primary branches returned")
-        print(f"  {len(open_primary)} open findings on primary branches returned")
-        fixed_ids = {f.id for f in fixed}
-        open_primary_ids = {f.id for f in open_primary}
-
         # --- Case A: items in repos NOT in Semgrep's active-projects list ---
         not_scanned_this_type: set[str] = set()
         for repo in by_repo:
@@ -1474,21 +1456,78 @@ def mark_fixed(
                     except Exception as exc:
                         print(f"      [{board_type}] Failed to mark item {iid}: {exc}")
 
-        # --- Case B: for active repos, mark items whose finding_ids match fixed_ids ---
-        items_to_mark: list[tuple[str, str, dict]] = []  # (repo, iid, entry)
+        # --- Case B: mark items in active repos whose primary-branch findings are ALL fixed ---
+        # Active items only (not-scanned repos are handled by Case A above).
+        active_items: list[tuple[str, str, dict, set]] = []  # (repo, iid, entry, my_fids)
         for repo, repo_items in by_repo.items():
             if repo in not_scanned_this_type:
                 continue
             for iid, entry in repo_items.items():
-                my_fids = set(item_finding_ids(entry))
-                primary_fids = my_fids & (fixed_ids | open_primary_ids)
-                if primary_fids and primary_fids.issubset(fixed_ids):
-                    items_to_mark.append((repo, iid, entry))
+                active_items.append((repo, iid, entry, set(item_finding_ids(entry))))
+
+        items_to_mark: list[tuple[str, str, dict]] = []  # (repo, iid, entry)
+        fixed_on_primary: set[str] = set()  # finding IDs confirmed FIXED on primary (for logging)
+        try:
+            if fixed_since:
+                # Time-windowed path: fetch the small set of findings recently
+                # marked FIXED on the primary branch, then pick candidate items.
+                print(f"\n=== Fetching recently-fixed {board_type} findings from Semgrep (v2) ===")
+                print(f"  Fixed filter: onPrimaryBranch=true, aggregateIssueStates=FIXED, since={fixed_since}")
+                fixed = semgrep.fetch_fixed_issues_v2(issue_type=issue_type, since=fixed_since)
+                recent_fixed_ids = {f.id for f in fixed}
+                s["fixed_findings_seen"] = len(recent_fixed_ids)
+                print(f"  {len(recent_fixed_ids)} recently-fixed findings on primary branches returned")
+
+                # Candidates = items with at least one recently-fixed finding.
+                multi_fids: set[str] = set()
+                multi_cands: list[tuple[str, str, dict, set]] = []
+                for repo, iid, entry, my_fids in active_items:
+                    if not (my_fids & recent_fixed_ids):
+                        continue
+                    if len(my_fids) == 1:
+                        # Its only finding is fixed on primary — mark without another call.
+                        items_to_mark.append((repo, iid, entry))
+                        fixed_on_primary |= my_fids
+                    else:
+                        multi_cands.append((repo, iid, entry, my_fids))
+                        multi_fids |= my_fids
+
+                # For multi-finding candidates, pull the exact status of just their findings.
+                if multi_fids:
+                    print(f"  Checking status of {len(multi_fids)} findings across {len(multi_cands)} multi-finding candidate items")
+                    states = semgrep.fetch_issue_states_v2(issue_type=issue_type, finding_ids=sorted(multi_fids))
+                    on_primary = set(states)
+                    fx = {f for f, is_fixed in states.items() if is_fixed}
+                    fixed_on_primary |= fx
+                    for repo, iid, entry, my_fids in multi_cands:
+                        primary_fids = my_fids & on_primary
+                        if primary_fids and primary_fids.issubset(fx):
+                            items_to_mark.append((repo, iid, entry))
+            else:
+                # No time window: look up the current status of every tracked
+                # finding directly (bounded by state size, batched server-side).
+                all_fids: set[str] = set()
+                for _, _, _, my_fids in active_items:
+                    all_fids |= my_fids
+                print(f"\n=== Checking status of {len(all_fids)} tracked {board_type} findings from Semgrep (v2) ===")
+                states = semgrep.fetch_issue_states_v2(issue_type=issue_type, finding_ids=sorted(all_fids))
+                on_primary = set(states)
+                fx = {f for f, is_fixed in states.items() if is_fixed}
+                fixed_on_primary = fx
+                s["fixed_findings_seen"] = len(fx)
+                print(f"  {len(on_primary)} findings on primary branch, {len(fx)} fixed")
+                for repo, iid, entry, my_fids in active_items:
+                    primary_fids = my_fids & on_primary
+                    if primary_fids and primary_fids.issubset(fx):
+                        items_to_mark.append((repo, iid, entry))
+        except SemgrepAPIError as exc:
+            print(f"  Semgrep API error: {exc}")
+            continue
 
         if items_to_mark:
             print(f"\n  {len(items_to_mark)} {board_type} monday items to mark Fixed")
             for repo, iid, entry in sorted(items_to_mark):
-                intersect = [fid for fid in item_finding_ids(entry) if fid in fixed_ids]
+                intersect = [fid for fid in item_finding_ids(entry) if fid in fixed_on_primary]
                 if dry_run:
                     print(f"    [DRY RUN] {board_type} item {iid} ({repo}): findings {item_finding_ids(entry)} (fixed on main: {intersect})")
                     s["items_marked_fixed"] += 1

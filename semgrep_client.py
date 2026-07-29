@@ -391,34 +391,73 @@ class SemgrepClient:
             results.extend(f for f in ai_results if f.id not in seen)
         return results
 
-    def fetch_open_primary_issues_v2(
+    def fetch_issue_states_v2(
         self,
         issue_type: str,
-        max_findings: int = 1_000_000,
-    ) -> list[Finding]:
-        """Fetch open findings on the primary branch via the v2 Issues API.
+        finding_ids: list[str],
+        id_batch_size: int = 100,
+    ) -> dict[str, bool]:
+        """Look up the current primary-branch status of specific finding IDs.
 
-        Server-side filters: aggregateIssueStates = OPEN, onPrimaryBranch = true.
+        Uses the v2 Issues API ``ids`` filter (with ``onPrimaryBranch: true``) to
+        fetch only the findings we care about, instead of paginating the whole
+        deployment backlog. IDs are queried in chunks of ``id_batch_size`` and
+        each chunk is cursor-paginated to completion.
 
         Args:
             issue_type: ``"sast"`` or ``"sca"``.
-            max_findings: Safety cap; defaults to 1M (effectively unbounded).
+            finding_ids: Finding IDs to look up (v1 finding IDs == v2 issue IDs).
+            id_batch_size: How many IDs to send per request.
 
         Returns:
-            List of Finding objects (id + repo minimally populated).
+            ``{finding_id: is_fixed}`` for every requested ID **that exists on the
+            primary branch**. ``True`` means aggregateState == FIXED. IDs that are
+            absent from the returned dict are not tracked on the primary branch
+            (e.g. branch-only findings) and should be ignored by callers.
         """
         if issue_type not in ("sast", "sca"):
-            raise SemgrepAPIError(f"fetch_open_primary_issues_v2 supports sast/sca; got '{issue_type}'")
-        filter_params: dict = {
-            "aggregateIssueStates": ["AGGREGATE_ISSUE_STATE_OPEN"],
-            "onPrimaryBranch": True,
-        }
-        results = self._fetch_v2_issues(issue_type, max_findings, filter_params)
+            raise SemgrepAPIError(f"fetch_issue_states_v2 supports sast/sca; got '{issue_type}'")
+        ids = list(dict.fromkeys(str(f) for f in finding_ids))
+        if not ids:
+            return {}
+        if not self._dep_id:
+            self._dep_id = self._fetch_deployment_id()
+        url = f"{SEMGREP_V2_BASE}/deployments/{self._dep_id}/issues"
+        # A finding belongs to exactly one issue type; for SAST we query both
+        # sast and ai_sast so ai-generated findings are covered too.
+        v2_types = [self._V2_ISSUE_TYPE_MAP[issue_type]]
         if issue_type == "sast":
-            ai_results = self._fetch_v2_issues("ai_sast", max_findings, filter_params)
-            seen = {f.id for f in results}
-            results.extend(f for f in ai_results if f.id not in seen)
-        return results
+            v2_types.append(self._V2_ISSUE_TYPE_MAP["ai_sast"])
+
+        result: dict[str, bool] = {}
+        for v2_type in v2_types:
+            for start in range(0, len(ids), id_batch_size):
+                chunk = ids[start:start + id_batch_size]
+                cursor: str = ""
+                while True:
+                    body: dict = {
+                        "deploymentId": self._dep_id,
+                        "issueType": v2_type,
+                        "limit": 100,
+                        "filter": {"ids": chunk, "onPrimaryBranch": True},
+                    }
+                    if cursor:
+                        body["cursor"] = cursor
+                    data = self._post(url, body)
+                    issues = data.get("issues", [])
+                    if not issues:
+                        break
+                    for item in issues:
+                        issue = item.get("issue") or item
+                        fid = str(issue.get("id"))
+                        is_fixed = issue.get("aggregateState") == "AGGREGATE_ISSUE_STATE_FIXED"
+                        # If the same ID surfaces twice, a FIXED verdict wins.
+                        if fid not in result or is_fixed:
+                            result[fid] = is_fixed
+                    cursor = data.get("cursor", "")
+                    if not cursor:
+                        break
+        return result
 
     def triage_findings(
         self,
